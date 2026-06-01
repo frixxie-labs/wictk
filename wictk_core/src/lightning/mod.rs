@@ -64,12 +64,12 @@ impl Lightning {
             .ok_or_else(|| anyhow::anyhow!("Expected an array of lightning events"))?
             .iter()
             .filter_map(|event| {
-                // event is on the form: [timestamp, latitude, longitude, magic_value]
+                // event is on the form: [timestamp, longitude, latitude, magic_value]
                 match event.as_array() {
                     Some(arr) if arr.len() == 4 => {
                         let timestamp = arr[0].as_i64()?;
-                        let latitude = arr[1].as_f64()?;
-                        let longitude = arr[2].as_f64()?;
+                        let longitude = arr[1].as_f64()?;
+                        let latitude = arr[2].as_f64()?;
                         let magic_value = arr[3].as_u64()? as u8;
 
                         let time = DateTime::<Utc>::from_timestamp(timestamp, 0);
@@ -111,7 +111,7 @@ mod tests {
     async fn test_find_lightning() -> Result<()> {
         let mut server = mockito::Server::new_async().await;
         let mock_response = serde_json::json!({
-            "historicalData": "[[1700000000,59.9139,10.7522,1],[1700000060,60.1699,11.3001,2]]"
+            "historicalData": "[[1700000000,10.7522,59.9139,1],[1700000060,11.3001,60.1699,2]]"
         });
 
         let _m = server
@@ -127,7 +127,11 @@ mod tests {
         let lightning_data = Lightning::find_ligntning(&client, &url).await?;
 
         assert_eq!(lightning_data.len(), 2);
+        assert_eq!(lightning_data[0].location.x(), 10.7522);
+        assert_eq!(lightning_data[0].location.y(), 59.9139);
         assert_eq!(lightning_data[0].magic_value, 1);
+        assert_eq!(lightning_data[1].location.x(), 11.3001);
+        assert_eq!(lightning_data[1].location.y(), 60.1699);
         assert_eq!(lightning_data[1].magic_value, 2);
         Ok(())
     }
