@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-pub mod types;
 pub mod device_client;
+pub mod types;
 
-pub use types::Device;
 pub use device_client::DeviceClient;
+pub use types::Device;
 
 pub type DeviceId = i32;
 

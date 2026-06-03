@@ -1,10 +1,10 @@
 use crate::AppState;
 use axum::{
-    Json, Router,
     extract::{Request, State},
     middleware::{self, Next},
     response::Response,
     routing::get,
+    Json, Router,
 };
 use lightning::get_recent_lightning;
 use metrics::histogram;

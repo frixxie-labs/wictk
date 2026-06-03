@@ -15,11 +15,7 @@ impl WeatherClient {
 
 impl WeatherApi for WeatherClient {
     #[instrument(skip(self), fields(url = %url, location = %location))]
-    async fn get_nowcast(
-        &self,
-        url: &str,
-        location: &str,
-    ) -> Result<Vec<wictk_core::Nowcast>> {
+    async fn get_nowcast(&self, url: &str, location: &str) -> Result<Vec<wictk_core::Nowcast>> {
         tracing::debug!("Fetching nowcast data");
         let full_url = format!("{url}api/nowcasts?location={location}");
         tracing::info!("Requesting nowcast data from: {}", full_url);
@@ -73,6 +69,34 @@ impl WeatherApi for WeatherClient {
             Ok(lightnings)
         } else {
             tracing::error!("Failed to fetch lightning data: HTTP {}", response.status());
+            bail!("HTTP error: {}", response.status())
+        }
+    }
+
+    #[instrument(skip(self), fields(url = %url))]
+    async fn get_alerts(&self, url: &str) -> Result<Vec<wictk_core::Alert>> {
+        tracing::debug!("Fetching alert data");
+        let full_url = format!("{url}api/alerts");
+        tracing::info!("Requesting alert data from: {}", full_url);
+
+        let response = self
+            .client
+            .get(&full_url)
+            .send()
+            .await
+            .context("Failed to fetch alert data")?;
+
+        tracing::debug!("Response status: {}", response.status());
+
+        if response.status().is_success() {
+            let alerts: Vec<wictk_core::Alert> = response
+                .json()
+                .await
+                .context("Failed to parse alert response")?;
+            tracing::info!("Successfully fetched {} alert records", alerts.len());
+            Ok(alerts)
+        } else {
+            tracing::error!("Failed to fetch alert data: HTTP {}", response.status());
             bail!("HTTP error: {}", response.status())
         }
     }
@@ -264,6 +288,47 @@ mod tests {
         let weather_client = make_client();
         let result = weather_client
             .get_lightnings(&format!("{}/", server.url()))
+            .await;
+
+        assert!(result.is_err());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_get_alerts_successfully() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/alerts")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"["Nve", "Nve"]"#)
+            .create_async()
+            .await;
+
+        let weather_client = make_client();
+        let result = weather_client
+            .get_alerts(&format!("{}/", server.url()))
+            .await;
+
+        assert!(result.is_ok());
+        let alerts = result.unwrap();
+        assert_eq!(alerts.len(), 2);
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_handle_alerts_server_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/alerts")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let weather_client = make_client();
+        let result = weather_client
+            .get_alerts(&format!("{}/", server.url()))
             .await;
 
         assert!(result.is_err());

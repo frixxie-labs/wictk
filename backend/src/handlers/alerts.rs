@@ -1,7 +1,7 @@
 use crate::AppState;
 use axum::{
-    Json,
     extract::{Query, State},
+    Json,
 };
 use geo::{Point, Polygon};
 use reqwest::StatusCode;
@@ -12,7 +12,7 @@ use wictk_core::{Alert, Area, Coordinates, MetAlert};
 
 use super::{
     error::ApplicationError,
-    nowcasts::{LocationQuery, find_location},
+    nowcasts::{find_location, LocationQuery},
 };
 
 pub type Alerts = Vec<Alert>;

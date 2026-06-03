@@ -33,10 +33,13 @@ async fn main() -> Result<()> {
     let sensor_url = format!("{}api/sensors", opts.hemrs_url);
     let sensors: SensorIds = sensor_client.setup_sensors(&sensor_url).await?;
 
-    // Setup lightning device (global)
+    // Setup global devices
     let device_url = format!("{}api/devices", opts.hemrs_url);
     let device_lightning: device::DeviceId = device_client
         .setup_device(&device_url, "wictk_lightning", "Mobile")
+        .await?;
+    let device_alerts: device::DeviceId = device_client
+        .setup_device(&device_url, "wictk_alerts", "Global")
         .await?;
 
     let setup_elapsed = setup_start.elapsed();
@@ -44,6 +47,26 @@ async fn main() -> Result<()> {
         "Global setup completed in {:.2}s",
         setup_elapsed.as_secs_f64()
     );
+
+    match weather_client.get_alerts(&opts.service_url).await {
+        Ok(alerts) => {
+            tracing::info!("Backend returned {} weather alerts", alerts.len());
+            let storage_url = format!("{}api/measurements", opts.hemrs_url);
+            if let Err(e) = storage_client
+                .store_alert_count(
+                    &storage_url,
+                    chrono::Utc::now(),
+                    &device_alerts,
+                    sensors.alert_count,
+                    alerts.len(),
+                )
+                .await
+            {
+                tracing::warn!("Failed to store weather alert count: {}", e);
+            }
+        }
+        Err(e) => tracing::warn!("Failed to fetch weather alerts from backend: {}", e),
+    }
 
     // Process each location
     for location in &opts.locations {

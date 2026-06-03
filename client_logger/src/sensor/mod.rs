@@ -1,10 +1,10 @@
 use anyhow::Result;
 
-pub mod types;
 pub mod sensor_client;
+pub mod types;
 
-pub use types::{Sensor, SensorIds};
 pub use sensor_client::SensorClient;
+pub use types::{Sensor, SensorIds};
 
 pub trait SensorApi {
     async fn get_sensors(&mut self, url: &str) -> Result<Vec<Sensor>>;

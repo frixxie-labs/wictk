@@ -1,7 +1,7 @@
 pub mod handlers;
 
-use axum::serve;
 use anyhow::Context;
+use axum::serve;
 use clap::Parser;
 use handlers::Alerts;
 use metrics_exporter_prometheus::PrometheusBuilder;

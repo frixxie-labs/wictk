@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 
 use crate::device::DeviceId;
 use crate::measurement::NewMeasurement;
@@ -83,7 +84,9 @@ impl StorageApi for StorageClient {
             .await
             .with_context(|| format!("Failed to send MET nowcast measurements to {url}"))?
             .error_for_status()
-            .with_context(|| format!("Storage service rejected MET nowcast measurements at {url}"))?;
+            .with_context(|| {
+                format!("Storage service rejected MET nowcast measurements at {url}")
+            })?;
 
         Ok(())
     }
@@ -164,7 +167,9 @@ impl StorageApi for StorageClient {
             .await
             .with_context(|| format!("Failed to send OpenWeather nowcast measurements to {url}"))?
             .error_for_status()
-            .with_context(|| format!("Storage service rejected OpenWeather nowcast measurements at {url}"))?;
+            .with_context(|| {
+                format!("Storage service rejected OpenWeather nowcast measurements at {url}")
+            })?;
 
         Ok(())
     }
@@ -177,7 +182,10 @@ impl StorageApi for StorageClient {
         lat_id: i32,
         lightnings: &[wictk_core::Lightning],
     ) -> Result<()> {
-        tracing::info!("Storing batch of {} lightning measurements", lightnings.len());
+        tracing::info!(
+            "Storing batch of {} lightning measurements",
+            lightnings.len()
+        );
         let measurements: Vec<NewMeasurement> = lightnings
             .iter()
             .flat_map(|lightning| {
@@ -209,6 +217,37 @@ impl StorageApi for StorageClient {
 
         Ok(())
     }
+
+    async fn store_alert_count(
+        &self,
+        url: &str,
+        timestamp: DateTime<Utc>,
+        device_id: &DeviceId,
+        alert_count_sensor_id: i32,
+        alert_count: usize,
+    ) -> Result<()> {
+        tracing::info!("Storing alert count measurement: {}", alert_count);
+
+        let alert_count = NewMeasurement::new_with_ts(
+            timestamp,
+            *device_id,
+            alert_count_sensor_id,
+            alert_count as f32,
+        );
+
+        self.client
+            .post(url)
+            .json(&vec![&alert_count])
+            .send()
+            .await
+            .with_context(|| format!("Failed to send alert count measurement to {url}"))?
+            .error_for_status()
+            .with_context(|| {
+                format!("Storage service rejected alert count measurement at {url}")
+            })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +275,7 @@ mod tests {
             visibility: 11,
             lon: 12,
             lat: 13,
+            alert_count: 14,
         }
     }
 
@@ -284,7 +324,11 @@ mod tests {
     #[tokio::test]
     async fn should_store_openweather_nowcast() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(200).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .create_async()
+            .await;
 
         let openweather_nowcast = wictk_core::OpenWeatherNowcast {
             dt: make_timestamp(),
@@ -316,7 +360,11 @@ mod tests {
     #[tokio::test]
     async fn should_handle_store_met_nowcast_error() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(500).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
 
         let met_nowcast = wictk_core::MetNowcast {
             time: make_timestamp(),
@@ -349,7 +397,11 @@ mod tests {
     #[tokio::test]
     async fn should_handle_store_openweather_nowcast_error() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(500).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
 
         let openweather_nowcast = wictk_core::OpenWeatherNowcast {
             dt: make_timestamp(),
@@ -416,17 +468,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_store_alert_count() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .match_body(mockito::Matcher::JsonString(
+                r#"[{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":14,"measurement":2.0}]"#
+                    .to_string(),
+            ))
+            .create_async()
+            .await;
+
+        let storage_client = make_client();
+        let result = storage_client
+            .store_alert_count(&server.url(), make_timestamp(), &1, 14, 2)
+            .await;
+
+        assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_handle_store_alert_count_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let storage_client = make_client();
+        let result = storage_client
+            .store_alert_count(&server.url(), make_timestamp(), &1, 14, 2)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Expected error for HTTP 500 but got: {result:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn should_handle_store_lightnings_error() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(500).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
 
-        let lightnings = vec![
-            wictk_core::Lightning {
-                time: make_timestamp(),
-                location: Point::new(10.0, 63.0),
-                magic_value: 42,
-            },
-        ];
+        let lightnings = vec![wictk_core::Lightning {
+            time: make_timestamp(),
+            location: Point::new(10.0, 63.0),
+            magic_value: 42,
+        }];
 
         let storage_client = make_client();
         let result = storage_client

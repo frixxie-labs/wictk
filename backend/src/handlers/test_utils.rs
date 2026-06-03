@@ -1,4 +1,4 @@
-use crate::{AppState, handlers::setup_router};
+use crate::{handlers::setup_router, AppState};
 use axum::{
     body::Body,
     http::{Request, StatusCode},

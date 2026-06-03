@@ -15,6 +15,7 @@ pub struct SensorIds {
     pub visibility: i32,
     pub lon: i32,
     pub lat: i32,
+    pub alert_count: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -56,6 +57,7 @@ mod tests {
                 visibility: i32::arbitrary(g),
                 lon: i32::arbitrary(g),
                 lat: i32::arbitrary(g),
+                alert_count: i32::arbitrary(g),
             }
         }
     }

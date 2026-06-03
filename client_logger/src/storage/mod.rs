@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 
 use crate::device::DeviceId;
 use crate::sensor::SensorIds;
@@ -31,5 +32,14 @@ pub trait StorageApi {
         lon_id: i32,
         lat_id: i32,
         lightnings: &[wictk_core::Lightning],
+    ) -> Result<()>;
+
+    async fn store_alert_count(
+        &self,
+        url: &str,
+        timestamp: DateTime<Utc>,
+        device_id: &DeviceId,
+        alert_count_sensor_id: i32,
+        alert_count: usize,
     ) -> Result<()>;
 }

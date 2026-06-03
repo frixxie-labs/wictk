@@ -84,10 +84,9 @@ pub async fn get_met_alerts(client: &Client, url: &str, location: &str) -> Resul
         .send()
         .await
         .with_context(|| format!("Failed to fetch alerts for location '{location}' from {url}"))?;
-    let alerts: Vec<Alert> = resp
-        .json()
-        .await
-        .with_context(|| format!("Failed to parse alerts response for location '{location}' from {url}"))?;
+    let alerts: Vec<Alert> = resp.json().await.with_context(|| {
+        format!("Failed to parse alerts response for location '{location}' from {url}")
+    })?;
     Ok(alerts)
 }
 

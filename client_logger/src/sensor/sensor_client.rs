@@ -104,6 +104,7 @@ impl SensorApi for SensorClient {
         let visibility = self.setup_sensor(url, "visibility", "m").await?;
         let lon = self.setup_sensor(url, "lon", "°").await?;
         let lat = self.setup_sensor(url, "lat", "°").await?;
+        let alert_count = self.setup_sensor(url, "alert_count", "count").await?;
 
         Ok(SensorIds {
             temperature,
@@ -119,6 +120,7 @@ impl SensorApi for SensorClient {
             visibility,
             lon,
             lat,
+            alert_count,
         })
     }
 }
@@ -343,7 +345,8 @@ mod tests {
                 {"id": 10, "name": "clouds", "unit": "%"},
                 {"id": 11, "name": "visibility", "unit": "m"},
                 {"id": 12, "name": "lon", "unit": "°"},
-                {"id": 13, "name": "lat", "unit": "°"}
+                {"id": 13, "name": "lat", "unit": "°"},
+                {"id": 14, "name": "alert_count", "unit": "count"}
             ]"#,
             )
             .expect(1)
@@ -368,6 +371,7 @@ mod tests {
         assert_eq!(sensor_ids.visibility, 11);
         assert_eq!(sensor_ids.lon, 12);
         assert_eq!(sensor_ids.lat, 13);
+        assert_eq!(sensor_ids.alert_count, 14);
 
         mock_get.assert_async().await;
     }
@@ -435,10 +439,16 @@ mod tests {
         let mut sensor_client = make_client();
 
         sensor_client.get_sensors(&server.url()).await.unwrap();
-        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°C");
+        assert_eq!(
+            sensor_client.lookup_sensor("temperature").unwrap().unit,
+            "°C"
+        );
 
         sensor_client.get_sensors(&server.url()).await.unwrap();
-        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°F");
+        assert_eq!(
+            sensor_client.lookup_sensor("temperature").unwrap().unit,
+            "°F"
+        );
 
         mock_first.assert_async().await;
         mock_second.assert_async().await;

@@ -1,6 +1,6 @@
 use axum::{
-    Json,
     extract::{Query, State},
+    Json,
 };
 use moka::future::Cache;
 use redact::Secret;

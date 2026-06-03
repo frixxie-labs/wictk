@@ -89,9 +89,7 @@ impl DeviceApi for DeviceClient {
                     .iter()
                     .find(|d| d.name == device_name && d.location == device_location)
                     .map(|d| d.id)
-                    .ok_or_else(|| {
-                        anyhow!("Device not found after creation")
-                    })
+                    .ok_or_else(|| anyhow!("Device not found after creation"))
             }
         }
     }
@@ -312,7 +310,9 @@ mod tests {
             .await;
 
         let mut device_client = make_client();
-        assert!(device_client.lookup_device("test_device", "test_location").is_none());
+        assert!(device_client
+            .lookup_device("test_device", "test_location")
+            .is_none());
 
         device_client.get_devices(&server.url()).await.unwrap();
 
@@ -330,7 +330,9 @@ mod tests {
         assert_eq!(device.name, "another_device");
         assert_eq!(device.location, "another_location");
 
-        assert!(device_client.lookup_device("nonexistent", "nowhere").is_none());
+        assert!(device_client
+            .lookup_device("nonexistent", "nowhere")
+            .is_none());
 
         mock.assert_async().await;
     }
@@ -358,11 +360,25 @@ mod tests {
         let mut device_client = make_client();
 
         device_client.get_devices(&server.url()).await.unwrap();
-        assert_eq!(device_client.lookup_device("test_device", "old_location").unwrap().location, "old_location");
+        assert_eq!(
+            device_client
+                .lookup_device("test_device", "old_location")
+                .unwrap()
+                .location,
+            "old_location"
+        );
 
         device_client.get_devices(&server.url()).await.unwrap();
-        assert_eq!(device_client.lookup_device("test_device", "new_location").unwrap().location, "new_location");
-        assert!(device_client.lookup_device("test_device", "old_location").is_some());
+        assert_eq!(
+            device_client
+                .lookup_device("test_device", "new_location")
+                .unwrap()
+                .location,
+            "new_location"
+        );
+        assert!(device_client
+            .lookup_device("test_device", "old_location")
+            .is_some());
 
         mock_first.assert_async().await;
         mock_second.assert_async().await;
@@ -412,7 +428,9 @@ mod tests {
         let mut device_client = make_client();
         let _ = device_client.get_devices(&server.url()).await;
 
-        assert!(device_client.lookup_device("test_device", "test_location").is_none());
+        assert!(device_client
+            .lookup_device("test_device", "test_location")
+            .is_none());
 
         mock.assert_async().await;
     }

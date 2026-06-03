@@ -1,6 +1,6 @@
 use axum::{
-    Json,
     extract::{Query, State},
+    Json,
 };
 use geo::{Distance, Haversine, Point};
 use reqwest::StatusCode;
@@ -13,7 +13,7 @@ use crate::AppState;
 
 use super::{
     error::ApplicationError,
-    nowcasts::{LocationQuery, find_location},
+    nowcasts::{find_location, LocationQuery},
 };
 
 #[derive(Debug, Serialize, Deserialize, Default, ToSchema, IntoParams)]
