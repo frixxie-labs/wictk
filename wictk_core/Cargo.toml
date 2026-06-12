@@ -18,3 +18,4 @@ utoipa = { version = "5", features = ["chrono"] }
 
 [dev-dependencies]
 mockito = "1.7.2"
+quickcheck = "1"

@@ -9,37 +9,51 @@ pub use location::OpenWeatherMapLocation;
 
 #[cfg(test)]
 mod tests {
-    use pretty_assertions::assert_eq;
+    use quickcheck::{quickcheck, TestResult};
 
-    use crate::locations::{city::City, coordinates::Coordinates};
+    use crate::locations::{city::City, coordinates::Coordinates, CoordinatesAsString};
 
-    #[test]
-    fn test_location() {
-        let location = Coordinates::new(2.0, 1.0);
-        assert_eq!(location.lon, 2.0);
-        assert_eq!(location.lat, 1.0);
-    }
+    quickcheck! {
+        fn prop_coordinates_new_preserves_fields(lon: f32, lat: f32) -> bool {
+            let location = Coordinates::new(lon, lat);
 
-    #[test]
-    fn deserialize_location() {
-        let json = "{\"lon\": 2.0, \"lat\": 1.0}";
-        let location: Coordinates = serde_json::from_str(json).unwrap();
-        assert_eq!(location.lon, 2.0);
-        assert_eq!(location.lat, 1.0);
-    }
+            location.lon.to_bits() == lon.to_bits() && location.lat.to_bits() == lat.to_bits()
+        }
 
-    #[test]
-    fn serialize_location() {
-        let location = Coordinates::new(2.0, 1.0);
-        let json = serde_json::to_string(&location).unwrap();
-        assert_eq!(json, "{\"lon\":2.0,\"lat\":1.0}");
-    }
+        fn prop_coordinates_json_round_trips(lon: f32, lat: f32) -> TestResult {
+            if !lon.is_finite() || !lat.is_finite() {
+                return TestResult::discard();
+            }
 
-    #[test]
-    fn test_location_city() {
-        let location_query = City {
-            location: "Oslo".to_string(),
-        };
-        assert_eq!(location_query.location, "Oslo".to_string());
+            let location = Coordinates::new(lon, lat);
+            let json = serde_json::to_string(&location).unwrap();
+            let parsed: Coordinates = serde_json::from_str(&json).unwrap();
+
+            TestResult::from_bool(parsed == location)
+        }
+
+        fn prop_coordinates_as_string_matches_f32_parse(lon: String, lat: String) -> bool {
+            let parsed = Coordinates::try_from(CoordinatesAsString {
+                lon: lon.clone(),
+                lat: lat.clone(),
+            });
+
+            match (lon.parse::<f32>(), lat.parse::<f32>(), parsed) {
+                (Ok(expected_lon), Ok(expected_lat), Ok(actual)) => {
+                    actual.lon.to_bits() == expected_lon.to_bits()
+                        && actual.lat.to_bits() == expected_lat.to_bits()
+                }
+                (Err(_), _, Err(_)) | (_, Err(_), Err(_)) => true,
+                _ => false,
+            }
+        }
+
+        fn prop_city_json_round_trips(location: String) -> bool {
+            let city = City { location };
+            let json = serde_json::to_string(&city).unwrap();
+            let parsed: City = serde_json::from_str(&json).unwrap();
+
+            parsed == city
+        }
     }
 }

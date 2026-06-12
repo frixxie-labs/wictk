@@ -33,3 +33,4 @@ tokio-test = "0.4.5"
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.3"
 once_cell = "1.21.4"
+quickcheck = "1"

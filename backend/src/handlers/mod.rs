@@ -158,9 +158,17 @@ mod tests {
     use crate::handlers::test_utils::{create_test_app, make_request, make_request_with_method};
     use axum::http::StatusCode;
     use axum::{extract::Query, http::Uri};
+    use quickcheck::quickcheck;
     use wictk_core::{City, CoordinatesAsString};
 
     use crate::handlers::nowcasts::LocationQuery;
+
+    fn safe_query_value(value: String) -> String {
+        value
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+            .collect()
+    }
 
     #[tokio::test]
     async fn test_metrics_endpoint() {
@@ -204,61 +212,42 @@ mod tests {
         assert!(body_str.contains("handler"));
     }
 
-    #[test]
-    fn parse_location() {
-        let uri: Uri = "http://localhost:3000/api/nowcasts?location=Oslo"
-            .parse()
-            .unwrap();
+    quickcheck! {
+        fn prop_parse_location_from_query(location: String) -> bool {
+            let location = safe_query_value(location);
+            let uri: Uri = format!("http://localhost:3000/api/nowcasts?location={location}")
+                .parse()
+                .unwrap();
 
-        let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
+            let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
 
-        assert_eq!(
-            query.0,
-            LocationQuery::Location(City {
-                location: "Oslo".to_string()
-            })
-        );
-    }
+            query.0 == LocationQuery::Location(City { location })
+        }
 
-    #[test]
-    fn parse_coordinates() {
-        let uri: Uri = "http://localhost:3000/api/nowcasts?lat=59.91273&lon=10.74609"
-            .parse()
-            .unwrap();
+        fn prop_parse_coordinates_from_query(lat: String, lon: String) -> bool {
+            let lat = safe_query_value(lat);
+            let lon = safe_query_value(lon);
+            let uri: Uri = format!("http://localhost:3000/api/nowcasts?lat={lat}&lon={lon}")
+                .parse()
+                .unwrap();
 
-        let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
+            let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
 
-        assert_eq!(
-            query.0,
-            LocationQuery::Coordinates(CoordinatesAsString {
-                lat: "59.91273".to_string(),
-                lon: "10.74609".to_string()
-            })
-        );
-    }
+            query.0 == LocationQuery::Coordinates(CoordinatesAsString { lat, lon })
+        }
 
-    #[test]
-    fn test_locationtype_city() {
-        let json = r#"{"location": "Oslo"}"#;
-        let location: LocationQuery = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            location,
-            LocationQuery::Location(City {
-                location: "Oslo".to_string()
-            })
-        );
-    }
+        fn prop_location_query_deserializes_city(location: String) -> bool {
+            let value = serde_json::json!({ "location": location });
+            let query: LocationQuery = serde_json::from_value(value).unwrap();
 
-    #[test]
-    fn test_locationtype_coordinates_strings() {
-        let json = r#"{"lat": "1.0", "lon": "2.0"}"#;
-        let location: LocationQuery = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            location,
-            LocationQuery::Coordinates(CoordinatesAsString {
-                lat: "1.0".to_string(),
-                lon: "2.0".to_string()
-            })
-        );
+            query == LocationQuery::Location(City { location })
+        }
+
+        fn prop_location_query_deserializes_coordinates(lat: String, lon: String) -> bool {
+            let value = serde_json::json!({ "lat": lat, "lon": lon });
+            let query: LocationQuery = serde_json::from_value(value).unwrap();
+
+            query == LocationQuery::Coordinates(CoordinatesAsString { lat, lon })
+        }
     }
 }

@@ -125,6 +125,7 @@ mod tests {
     use super::*;
     use crate::handlers::test_utils::{create_test_app, make_request};
     use axum::http::StatusCode;
+    use quickcheck::{quickcheck, TestResult};
 
     #[tokio::test]
     async fn test_recent_lightning_endpoint() {
@@ -135,23 +136,42 @@ mod tests {
         assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[test]
-    fn test_lightning_query_city() {
-        let json = r#"{"location": "Oslo", "radius_km": 100.0}"#;
-        let query: LightningQuery = serde_json::from_str(json).unwrap();
+    quickcheck! {
+        fn prop_lightning_query_city_deserializes(location: String, radius_km: f64) -> TestResult {
+            if !radius_km.is_finite() {
+                return TestResult::discard();
+            }
 
-        assert_eq!(query.location, Some("Oslo".to_string()));
-        assert_eq!(query.radius_km, Some(100.0));
-    }
+            let value = serde_json::json!({ "location": location, "radius_km": radius_km });
+            let query: LightningQuery = serde_json::from_value(value).unwrap();
 
-    #[test]
-    fn test_lightning_query_coordinates() {
-        let json = r#"{"lat": "63.4308", "lon": "10.4034", "radius_km": 50.0}"#;
-        let query: LightningQuery = serde_json::from_str(json).unwrap();
+            TestResult::from_bool(
+                query.location == Some(location)
+                    && query.radius_km == Some(radius_km)
+            )
+        }
 
-        assert_eq!(query.lat, Some("63.4308".to_string()));
-        assert_eq!(query.lon, Some("10.4034".to_string()));
-        assert_eq!(query.radius_km, Some(50.0));
+        fn prop_lightning_query_coordinates_deserializes(lat: String, lon: String, radius_km: f64) -> TestResult {
+            if !radius_km.is_finite() {
+                return TestResult::discard();
+            }
+
+            let value = serde_json::json!({ "lat": lat, "lon": lon, "radius_km": radius_km });
+            let query: LightningQuery = serde_json::from_value(value).unwrap();
+
+            TestResult::from_bool(
+                query.lat == Some(lat)
+                    && query.lon == Some(lon)
+                    && query.radius_km == Some(radius_km)
+            )
+        }
+
+        fn prop_lightning_query_without_radius_defaults_to_none(location: String) -> bool {
+            let value = serde_json::json!({ "location": location });
+            let query: LightningQuery = serde_json::from_value(value).unwrap();
+
+            query.location == Some(location) && query.radius_km.is_none()
+        }
     }
 
     #[test]
@@ -160,15 +180,6 @@ mod tests {
         let query: LightningQuery = serde_json::from_str(json).unwrap();
 
         assert!(query.location.is_none());
-        assert_eq!(query.radius_km, None);
-    }
-
-    #[test]
-    fn test_lightning_query_default_radius() {
-        let json = r#"{"location": "Trondheim"}"#;
-        let query: LightningQuery = serde_json::from_str(json).unwrap();
-
-        assert!(query.location.is_some());
         assert_eq!(query.radius_km, None);
     }
 

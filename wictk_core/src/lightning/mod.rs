@@ -94,17 +94,26 @@ impl Lightning {
 mod tests {
     use super::*;
     use geo::point;
+    use quickcheck::{quickcheck, TestResult};
 
-    #[test]
-    fn test_lightning_creation() {
-        let location = point!(x: 10.0, y: 20.0);
-        let time = Utc::now();
-        let magic_value = 42;
+    quickcheck! {
+        fn prop_lightning_new_preserves_fields(x: f64, y: f64, secs: i64, magic_value: u8) -> TestResult {
+            if !x.is_finite() || !y.is_finite() {
+                return TestResult::discard();
+            }
 
-        let lightning = Lightning::new(location, time, magic_value);
-        assert_eq!(lightning.location, location);
-        assert_eq!(lightning.time, time);
-        assert_eq!(lightning.magic_value, magic_value);
+            let location = point!(x: x, y: y);
+            let secs = secs.rem_euclid(4_000_000_000);
+            let time = DateTime::<Utc>::from_timestamp(secs, 0).unwrap();
+
+            let lightning = Lightning::new(location, time, magic_value);
+
+            TestResult::from_bool(
+                lightning.location == location
+                    && lightning.time == time
+                    && lightning.magic_value == magic_value,
+            )
+        }
     }
 
     #[tokio::test]
