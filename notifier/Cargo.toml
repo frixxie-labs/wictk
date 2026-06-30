@@ -13,3 +13,6 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 tokio = { version = "1.52.3", features = ["full"] }
 wictk_core = {path = "../wictk_core"}
+
+[dev-dependencies]
+mockito = "1.7.2"

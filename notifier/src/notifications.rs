@@ -157,8 +157,30 @@ mod tests {
 
     #[tokio::test]
     async fn should_publish_notification_ok() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/test_topic")
+            .match_header("Title", "Test Alert")
+            .match_header("Priority", "high")
+            .match_header("Tags", "warning")
+            .match_body("This is a test alert")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "id": "test-id",
+                    "time": 123,
+                    "expires": 456,
+                    "event": "message",
+                    "topic": "test_topic",
+                    "message": "This is a test alert"
+                }"#,
+            )
+            .create_async()
+            .await;
+
         let client = reqwest::Client::new();
-        let mut notifier = NtfyNotifier::new(client, "https://ntfy.frikk.io".to_string());
+        let mut notifier = NtfyNotifier::new(client, server.url());
         let alert = Notification::new(
             "Test Alert".to_string(),
             Priority::High,
@@ -168,6 +190,7 @@ mod tests {
         let topic = "test_topic".to_string();
         let response = notifier.publish(alert, &topic).await;
         assert!(response.is_ok());
+        mock.assert_async().await;
     }
 
     #[tokio::test]
