@@ -53,7 +53,7 @@ pub struct Opts {
     #[arg(long)]
     pub store_lightning: bool,
 
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "warn")]
     pub log_level: LogLevel,
 }
 
@@ -175,6 +175,6 @@ mod tests {
         assert_eq!(opts.service_url, "http://wictk.frikk.io/");
         assert_eq!(opts.hemrs_url, "http://hemrs.frikk.io/");
         assert!(!opts.store_lightning);
-        assert!(matches!(opts.log_level, LogLevel::Info));
+        assert!(matches!(opts.log_level, LogLevel::Warn));
     }
 }

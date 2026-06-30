@@ -66,7 +66,7 @@ pub struct Opts {
     topic: String,
 
     /// Log level
-    #[arg(long, default_value = "info")]
+    #[arg(long, default_value = "warn")]
     log_level: LogLevel,
 
     /// Sleep duration between checks (in seconds)
