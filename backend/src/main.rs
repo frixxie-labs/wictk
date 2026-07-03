@@ -46,7 +46,7 @@ pub struct Opts {
     #[arg(short, long, env = "OPENWEATHERMAPAPIKEY")]
     apikey: String,
 
-    #[arg(short, long, default_value = "warn")]
+    #[arg(short, long, default_value = "info")]
     log_level: LogLevel,
 }
 

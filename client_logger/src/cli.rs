@@ -53,7 +53,7 @@ pub struct Opts {
     #[arg(long)]
     pub store_lightning: bool,
 
-    #[arg(long, default_value = "warn")]
+    #[arg(long, default_value = "info")]
     pub log_level: LogLevel,
 }
 
