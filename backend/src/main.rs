@@ -99,7 +99,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let level: Level = opts.log_level.into();
 
-    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .json()
+        .flatten_event(true)
+        .finish();
 
     tracing::subscriber::set_global_default(subscriber).unwrap();
     let metrics_handler = PrometheusBuilder::new()

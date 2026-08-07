@@ -272,10 +272,14 @@ wictk/
 - **Load Tests**: Performance validation (Locust)
 
 ### Observability
-- **Logging**: Structured JSON logs with tracing
+- **Logging**: Newline-delimited, flattened JSON logs with tracing, compatible with VictoriaLogs
 - **Metrics**: Prometheus histograms for request latency
 - **Profiling**: Request timing middleware
 - **Health**: Dependency health checks
+
+Send container stdout to VictoriaLogs' `/insert/jsonline` endpoint with
+`_msg_field=message&_time_field=timestamp`. Use stable deployment metadata such
+as the application and namespace as stream fields in the log collector.
 
 ## Security Considerations
 
@@ -322,4 +326,3 @@ OPENWEATHERMAPAPIKEY=xxx cargo run --bin backend
 # Test API
 curl "http://localhost:3000/api/nowcasts?location=Oslo"
 ```
-

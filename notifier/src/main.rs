@@ -94,7 +94,11 @@ pub async fn get_met_alerts(client: &Client, url: &str, location: &str) -> Resul
 async fn main() -> Result<()> {
     let opts = Opts::parse();
     let level: Level = opts.log_level.clone().into();
-    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .json()
+        .flatten_event(true)
+        .finish();
     let client = reqwest::Client::new();
     let mut alerter = NtfyNotifier::new(client.clone(), opts.ntfy_url.clone());
     tracing::subscriber::set_global_default(subscriber).unwrap();

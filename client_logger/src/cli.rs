@@ -59,7 +59,11 @@ pub struct Opts {
 
 pub fn init_tracing(opts: &Opts) {
     let level: Level = opts.log_level.clone().into();
-    let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(level)
+        .json()
+        .flatten_event(true)
+        .finish();
     tracing::subscriber::set_global_default(subscriber).unwrap();
 }
 
