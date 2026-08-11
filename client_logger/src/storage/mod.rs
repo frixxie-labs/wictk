@@ -42,4 +42,12 @@ pub trait StorageApi {
         alert_count_sensor_id: i32,
         alert_count: usize,
     ) -> Result<()>;
+
+    async fn store_earthquakes(
+        &self,
+        url: &str,
+        device_id: &DeviceId,
+        sensor_ids: &SensorIds,
+        earthquakes: &[wictk_core::Earthquake],
+    ) -> Result<()>;
 }

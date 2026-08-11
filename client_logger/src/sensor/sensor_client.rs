@@ -105,6 +105,16 @@ impl SensorApi for SensorClient {
         let lon = self.setup_sensor(url, "lon", "°").await?;
         let lat = self.setup_sensor(url, "lat", "°").await?;
         let alert_count = self.setup_sensor(url, "alert_count", "count").await?;
+        let earthquake_depth = self.setup_sensor(url, "earthquake_depth", "km").await?;
+        let earthquake_magnitude = self
+            .setup_sensor(url, "earthquake_magnitude", "magnitude")
+            .await?;
+        let earthquake_significance = self
+            .setup_sensor(url, "earthquake_significance", "score")
+            .await?;
+        let earthquake_tsunami = self
+            .setup_sensor(url, "earthquake_tsunami", "boolean")
+            .await?;
 
         Ok(SensorIds {
             temperature,
@@ -121,6 +131,10 @@ impl SensorApi for SensorClient {
             lon,
             lat,
             alert_count,
+            earthquake_depth,
+            earthquake_magnitude,
+            earthquake_significance,
+            earthquake_tsunami,
         })
     }
 }
@@ -346,7 +360,11 @@ mod tests {
                 {"id": 11, "name": "visibility", "unit": "m"},
                 {"id": 12, "name": "lon", "unit": "°"},
                 {"id": 13, "name": "lat", "unit": "°"},
-                {"id": 14, "name": "alert_count", "unit": "count"}
+                {"id": 14, "name": "alert_count", "unit": "count"},
+                {"id": 15, "name": "earthquake_depth", "unit": "km"},
+                {"id": 16, "name": "earthquake_magnitude", "unit": "magnitude"},
+                {"id": 17, "name": "earthquake_significance", "unit": "score"},
+                {"id": 18, "name": "earthquake_tsunami", "unit": "boolean"}
             ]"#,
             )
             .expect(1)
@@ -372,6 +390,10 @@ mod tests {
         assert_eq!(sensor_ids.lon, 12);
         assert_eq!(sensor_ids.lat, 13);
         assert_eq!(sensor_ids.alert_count, 14);
+        assert_eq!(sensor_ids.earthquake_depth, 15);
+        assert_eq!(sensor_ids.earthquake_magnitude, 16);
+        assert_eq!(sensor_ids.earthquake_significance, 17);
+        assert_eq!(sensor_ids.earthquake_tsunami, 18);
 
         mock_get.assert_async().await;
     }

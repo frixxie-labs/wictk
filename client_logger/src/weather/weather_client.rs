@@ -101,21 +101,23 @@ impl WeatherApi for WeatherClient {
         }
     }
 
-    #[instrument(skip(self), fields(url = %url, location = %location, radius_km))]
+    #[instrument(skip(self), fields(url = %url, lat, lon, radius_km))]
     async fn get_earthquakes(
         &self,
         url: &str,
-        location: &str,
+        lat: f64,
+        lon: f64,
         radius_km: f64,
     ) -> Result<Vec<wictk_core::Earthquake>> {
         let full_url = format!("{url}api/earthquakes");
-        tracing::info!("Checking for earthquakes near {}", location);
+        tracing::info!("Checking for earthquakes near {}, {}", lat, lon);
 
         let response = self
             .client
             .get(&full_url)
             .query(&[
-                ("location", location),
+                ("lat", &lat.to_string()),
+                ("lon", &lon.to_string()),
                 ("radius_km", &radius_km.to_string()),
             ])
             .send()
@@ -129,9 +131,10 @@ impl WeatherApi for WeatherClient {
             .await
             .context("Failed to parse earthquake response")?;
         tracing::info!(
-            "Successfully fetched {} earthquake records near {}",
+            "Successfully fetched {} earthquake records near {}, {}",
             earthquakes.len(),
-            location
+            lat,
+            lon
         );
         Ok(earthquakes)
     }
@@ -376,7 +379,8 @@ mod tests {
         let mock = server
             .mock("GET", "/api/earthquakes")
             .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("location".into(), "Japan".into()),
+                mockito::Matcher::UrlEncoded("lat".into(), "36.2048".into()),
+                mockito::Matcher::UrlEncoded("lon".into(), "138.2529".into()),
                 mockito::Matcher::UrlEncoded("radius_km".into(), "2000".into()),
             ]))
             .with_status(200)
@@ -401,7 +405,7 @@ mod tests {
             .await;
 
         let earthquakes = make_client()
-            .get_earthquakes(&format!("{}/", server.url()), "Japan", 2000.0)
+            .get_earthquakes(&format!("{}/", server.url()), 36.2048, 138.2529, 2000.0)
             .await
             .unwrap();
 

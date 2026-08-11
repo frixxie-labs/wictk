@@ -16,6 +16,10 @@ pub struct SensorIds {
     pub lon: i32,
     pub lat: i32,
     pub alert_count: i32,
+    pub earthquake_depth: i32,
+    pub earthquake_magnitude: i32,
+    pub earthquake_significance: i32,
+    pub earthquake_tsunami: i32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -58,6 +62,10 @@ mod tests {
                 lon: i32::arbitrary(g),
                 lat: i32::arbitrary(g),
                 alert_count: i32::arbitrary(g),
+                earthquake_depth: i32::arbitrary(g),
+                earthquake_magnitude: i32::arbitrary(g),
+                earthquake_significance: i32::arbitrary(g),
+                earthquake_tsunami: i32::arbitrary(g),
             }
         }
     }

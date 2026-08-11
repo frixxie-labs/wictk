@@ -41,6 +41,9 @@ async fn main() -> Result<()> {
     let device_alerts: device::DeviceId = device_client
         .setup_device(&device_url, "wictk_alerts", "Global")
         .await?;
+    let device_earthquakes: device::DeviceId = device_client
+        .setup_device(&device_url, "wictk_earthquake", "Japan")
+        .await?;
 
     let setup_elapsed = setup_start.elapsed();
     tracing::info!(
@@ -69,7 +72,7 @@ async fn main() -> Result<()> {
     }
 
     match weather_client
-        .get_earthquakes(&opts.service_url, "Japan", 2000.0)
+        .get_earthquakes(&opts.service_url, 36.2048, 138.2529, 2000.0)
         .await
     {
         Ok(earthquakes) if earthquakes.is_empty() => {
@@ -81,6 +84,13 @@ async fn main() -> Result<()> {
                 earthquakes = ?earthquakes,
                 "Recent earthquakes found near Japan"
             );
+            let storage_url = format!("{}api/measurements", opts.hemrs_url);
+            if let Err(e) = storage_client
+                .store_earthquakes(&storage_url, &device_earthquakes, &sensors, &earthquakes)
+                .await
+            {
+                tracing::warn!("Failed to store earthquakes near Japan: {}", e);
+            }
         }
         Err(e) => tracing::warn!("Failed to check for earthquakes near Japan: {}", e),
     }

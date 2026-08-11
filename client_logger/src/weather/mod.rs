@@ -14,7 +14,8 @@ pub trait WeatherApi {
     async fn get_earthquakes(
         &self,
         url: &str,
-        location: &str,
+        lat: f64,
+        lon: f64,
         radius_km: f64,
     ) -> Result<Vec<wictk_core::Earthquake>>;
 }

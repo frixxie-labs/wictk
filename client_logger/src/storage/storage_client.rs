@@ -248,6 +248,76 @@ impl StorageApi for StorageClient {
 
         Ok(())
     }
+
+    async fn store_earthquakes(
+        &self,
+        url: &str,
+        device_id: &DeviceId,
+        sensor_ids: &SensorIds,
+        earthquakes: &[wictk_core::Earthquake],
+    ) -> Result<()> {
+        let measurements: Vec<NewMeasurement> = earthquakes
+            .iter()
+            .flat_map(|earthquake| {
+                let mut measurements = vec![
+                    NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.earthquake_depth,
+                        earthquake.depth_km as f32,
+                    ),
+                    NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.lon,
+                        earthquake.coordinates.lon,
+                    ),
+                    NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.lat,
+                        earthquake.coordinates.lat,
+                    ),
+                    NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.earthquake_tsunami,
+                        f32::from(earthquake.tsunami),
+                    ),
+                ];
+                if let Some(magnitude) = earthquake.magnitude {
+                    measurements.push(NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.earthquake_magnitude,
+                        magnitude as f32,
+                    ));
+                }
+                if let Some(significance) = earthquake.significance {
+                    measurements.push(NewMeasurement::new_with_ts(
+                        earthquake.time,
+                        *device_id,
+                        sensor_ids.earthquake_significance,
+                        significance as f32,
+                    ));
+                }
+                measurements
+            })
+            .collect();
+
+        self.client
+            .post(url)
+            .json(&measurements)
+            .send()
+            .await
+            .with_context(|| format!("Failed to send earthquake measurements to {url}"))?
+            .error_for_status()
+            .with_context(|| {
+                format!("Storage service rejected earthquake measurements at {url}")
+            })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +346,10 @@ mod tests {
             lon: 12,
             lat: 13,
             alert_count: 14,
+            earthquake_depth: 15,
+            earthquake_magnitude: 16,
+            earthquake_significance: 17,
+            earthquake_tsunami: 18,
         }
     }
 
@@ -534,6 +608,41 @@ mod tests {
             result.is_err(),
             "Expected error for HTTP 500 but got: {result:?}"
         );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_store_earthquakes() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::JsonString(
+                r#"[{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":15,"measurement":8.3},{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":12,"measurement":138.0},{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":13,"measurement":36.0},{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":18,"measurement":1.0},{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":16,"measurement":4.7},{"timestamp":"2025-08-11T12:00:00Z","device":1,"sensor":17,"measurement":340.0}]"#.to_string(),
+            ))
+            .with_status(200)
+            .create_async()
+            .await;
+        let timestamp = make_timestamp();
+        let earthquakes = vec![wictk_core::Earthquake {
+            id: "us-test".to_string(),
+            magnitude: Some(4.7),
+            place: Some("Near Japan".to_string()),
+            time: timestamp,
+            updated: timestamp,
+            coordinates: wictk_core::Coordinates::new(138.0, 36.0),
+            depth_km: 8.3,
+            significance: Some(340),
+            alert_level: None,
+            status: wictk_core::EarthquakeStatus::Reviewed,
+            tsunami: true,
+            details_url: "https://example.com/us-test".to_string(),
+        }];
+
+        make_client()
+            .store_earthquakes(&server.url(), &1, &make_sensor_ids(), &earthquakes)
+            .await
+            .unwrap();
+
         mock.assert_async().await;
     }
 }
