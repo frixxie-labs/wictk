@@ -13,6 +13,14 @@ mod sensor;
 mod storage;
 mod weather;
 
+fn retain_recent_earthquakes(
+    earthquakes: &mut Vec<wictk_core::Earthquake>,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let cutoff = now - chrono::Duration::minutes(10);
+    earthquakes.retain(|earthquake| earthquake.time >= cutoff && earthquake.time <= now);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = cli::Opts::parse();
@@ -75,21 +83,23 @@ async fn main() -> Result<()> {
         .get_earthquakes(&opts.service_url, 36.2048, 138.2529, 2000.0)
         .await
     {
-        Ok(earthquakes) if earthquakes.is_empty() => {
-            tracing::info!("No recent earthquakes found near Japan");
-        }
-        Ok(earthquakes) => {
-            tracing::warn!(
-                earthquake_count = earthquakes.len(),
-                earthquakes = ?earthquakes,
-                "Recent earthquakes found near Japan"
-            );
-            let storage_url = format!("{}api/measurements", opts.hemrs_url);
-            if let Err(e) = storage_client
-                .store_earthquakes(&storage_url, &device_earthquakes, &sensors, &earthquakes)
-                .await
-            {
-                tracing::warn!("Failed to store earthquakes near Japan: {}", e);
+        Ok(mut earthquakes) => {
+            retain_recent_earthquakes(&mut earthquakes, chrono::Utc::now());
+            if earthquakes.is_empty() {
+                tracing::info!("No earthquakes found near Japan in the last 10 minutes");
+            } else {
+                tracing::warn!(
+                    earthquake_count = earthquakes.len(),
+                    earthquakes = ?earthquakes,
+                    "Earthquakes found near Japan in the last 10 minutes"
+                );
+                let storage_url = format!("{}api/measurements", opts.hemrs_url);
+                if let Err(e) = storage_client
+                    .store_earthquakes(&storage_url, &device_earthquakes, &sensors, &earthquakes)
+                    .await
+                {
+                    tracing::warn!("Failed to store earthquakes near Japan: {}", e);
+                }
             }
         }
         Err(e) => tracing::warn!("Failed to check for earthquakes near Japan: {}", e),
@@ -311,4 +321,50 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Duration, Utc};
+    use wictk_core::{Coordinates, Earthquake, EarthquakeStatus};
+
+    use super::retain_recent_earthquakes;
+
+    fn earthquake(id: &str, time: DateTime<Utc>) -> Earthquake {
+        Earthquake {
+            id: id.to_string(),
+            magnitude: Some(1.0),
+            place: None,
+            time,
+            updated: time,
+            coordinates: Coordinates::new(138.2529, 36.2048),
+            depth_km: 1.0,
+            significance: None,
+            alert_level: None,
+            status: EarthquakeStatus::Reviewed,
+            tsunami: false,
+            details_url: "https://example.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn retains_only_earthquakes_from_the_last_ten_minutes() {
+        let now = DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut earthquakes = vec![
+            earthquake("old", now - Duration::minutes(10) - Duration::seconds(1)),
+            earthquake("boundary", now - Duration::minutes(10)),
+            earthquake("recent", now - Duration::minutes(1)),
+            earthquake("future", now + Duration::seconds(1)),
+        ];
+
+        retain_recent_earthquakes(&mut earthquakes, now);
+
+        let ids: Vec<&str> = earthquakes
+            .iter()
+            .map(|earthquake| earthquake.id.as_str())
+            .collect();
+        assert_eq!(ids, ["boundary", "recent"]);
+    }
 }
