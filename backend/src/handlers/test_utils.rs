@@ -8,6 +8,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tower::ServiceExt;
+use wictk_core::USGS_ALL_DAY_FEED_URL;
 
 static METRICS_HANDLE: Lazy<Mutex<Option<PrometheusHandle>>> = Lazy::new(|| Mutex::new(None));
 
@@ -23,11 +24,17 @@ pub fn get_metrics_handle() -> PrometheusHandle {
 }
 
 pub fn create_test_app() -> axum::Router {
-    let metrics_handler = get_metrics_handle();
-
     let client = reqwest::Client::new();
-    let app_state = AppState::new(client, "test_api_key".to_string());
-    setup_router(app_state, metrics_handler)
+    let app_state = AppState::new(
+        client,
+        "test_api_key".to_string(),
+        USGS_ALL_DAY_FEED_URL.to_string(),
+    );
+    create_test_app_with_state(app_state)
+}
+
+pub fn create_test_app_with_state(app_state: AppState) -> axum::Router {
+    setup_router(app_state, get_metrics_handle())
 }
 
 pub async fn make_request(app: axum::Router, uri: &str) -> (StatusCode, Vec<u8>) {

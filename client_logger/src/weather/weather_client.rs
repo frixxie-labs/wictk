@@ -100,6 +100,41 @@ impl WeatherApi for WeatherClient {
             bail!("HTTP error: {}", response.status())
         }
     }
+
+    #[instrument(skip(self), fields(url = %url, location = %location, radius_km))]
+    async fn get_earthquakes(
+        &self,
+        url: &str,
+        location: &str,
+        radius_km: f64,
+    ) -> Result<Vec<wictk_core::Earthquake>> {
+        let full_url = format!("{url}api/earthquakes");
+        tracing::info!("Checking for earthquakes near {}", location);
+
+        let response = self
+            .client
+            .get(&full_url)
+            .query(&[
+                ("location", location),
+                ("radius_km", &radius_km.to_string()),
+            ])
+            .send()
+            .await
+            .context("Failed to fetch earthquake data")?
+            .error_for_status()
+            .context("Failed to fetch earthquake data")?;
+
+        let earthquakes = response
+            .json::<Vec<wictk_core::Earthquake>>()
+            .await
+            .context("Failed to parse earthquake response")?;
+        tracing::info!(
+            "Successfully fetched {} earthquake records near {}",
+            earthquakes.len(),
+            location
+        );
+        Ok(earthquakes)
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +367,46 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_get_earthquakes_near_japan() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/earthquakes")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("location".into(), "Japan".into()),
+                mockito::Matcher::UrlEncoded("radius_km".into(), "2000".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"[{
+                    "id": "us-test",
+                    "magnitude": 4.7,
+                    "place": "Near Japan",
+                    "time": "2026-08-11T06:38:56Z",
+                    "updated": "2026-08-11T06:42:10Z",
+                    "coordinates": {"lon": 138.0, "lat": 36.0},
+                    "depth_km": 8.3,
+                    "significance": 340,
+                    "alert_level": "green",
+                    "status": "reviewed",
+                    "tsunami": false,
+                    "details_url": "https://example.com/us-test"
+                }]"#,
+            )
+            .create_async()
+            .await;
+
+        let earthquakes = make_client()
+            .get_earthquakes(&format!("{}/", server.url()), "Japan", 2000.0)
+            .await
+            .unwrap();
+
+        assert_eq!(earthquakes.len(), 1);
+        assert_eq!(earthquakes[0].id, "us-test");
         mock.assert_async().await;
     }
 

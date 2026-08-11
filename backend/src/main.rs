@@ -10,7 +10,7 @@ use redact::Secret;
 use tokio::net::TcpListener;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
-use wictk_core::{Lightning, Nowcast, OpenWeatherMapLocation};
+use wictk_core::{Earthquake, Lightning, Nowcast, OpenWeatherMapLocation, USGS_ALL_DAY_FEED_URL};
 
 use crate::handlers::setup_router;
 
@@ -48,6 +48,13 @@ pub struct Opts {
 
     #[arg(short, long, default_value = "info")]
     log_level: LogLevel,
+
+    #[arg(
+        long,
+        env = "USGS_EARTHQUAKE_FEED_URL",
+        default_value = USGS_ALL_DAY_FEED_URL
+    )]
+    earthquake_feed_url: String,
 }
 
 impl From<LogLevel> for Level {
@@ -70,10 +77,12 @@ pub struct AppState {
     pub location_cache: Cache<String, OpenWeatherMapLocation>,
     pub nowcast_cache: Cache<String, Nowcast>,
     pub lightning_cache: Cache<String, Vec<Lightning>>,
+    pub earthquake_cache: Cache<String, Vec<Earthquake>>,
+    pub earthquake_feed_url: String,
 }
 
 impl AppState {
-    pub fn new(client: reqwest::Client, apikey: String) -> Self {
+    pub fn new(client: reqwest::Client, apikey: String, earthquake_feed_url: String) -> Self {
         Self {
             openweathermap_apikey: Secret::new(apikey),
             client,
@@ -89,6 +98,10 @@ impl AppState {
             lightning_cache: CacheBuilder::new(1)
                 .time_to_live(std::time::Duration::from_secs(60 * 5))
                 .build(),
+            earthquake_cache: CacheBuilder::new(1)
+                .time_to_live(std::time::Duration::from_secs(60))
+                .build(),
+            earthquake_feed_url,
         }
     }
 }
@@ -120,7 +133,7 @@ async fn main() -> Result<(), anyhow::Error> {
     );
     let client = client_builder.user_agent(APP_USER_AGENT).build().unwrap();
 
-    let app_state = AppState::new(client, opts.apikey);
+    let app_state = AppState::new(client, opts.apikey, opts.earthquake_feed_url);
 
     let app = setup_router(app_state, metrics_handler);
 

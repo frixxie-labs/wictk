@@ -2,12 +2,13 @@
 
 ## Overview
 
-WICTK is a comprehensive weather data aggregation and alerting system designed to collect, process, and distribute weather information from multiple Norwegian data sources. The system provides real-time weather nowcasts, lightning strike data, and weather alerts through a REST API, with additional components for data collection and notification delivery.
+WICTK is a weather and environmental event aggregation system designed to collect, process, and distribute current information from multiple providers. The system provides weather nowcasts, lightning strikes, weather alerts, and recent earthquakes through a REST API, with additional components for data collection and notification delivery.
 
 ### Core Features
 
 - **Multi-source Weather Data**: Aggregates data from MET Norway and OpenWeatherMap
 - **Lightning Detection**: Real-time lightning strike monitoring and reporting
+- **Earthquake Monitoring**: Recent USGS earthquakes with magnitude and radius filtering
 - **Weather Alerts**: Automated alert monitoring and notification system
 - **Location Services**: Geocoding and coordinate-based weather queries
 - **High Performance**: In-memory caching and async processing
@@ -114,6 +115,12 @@ Lightning data follows a similar pattern but with specialized filtering for rece
 - `GET /api/recent_lightning` - All recent lightning strikes (24h)
 - `GET /api/recent_lightning?location={city}&radius_km={km}` - Filtered by location
 
+#### Earthquake Data
+- `GET /api/earthquakes` - Recent earthquakes from the USGS daily feed
+- `GET /api/earthquakes?min_magnitude={magnitude}&limit={count}` - Filtered by magnitude
+- `GET /api/earthquakes?location={city}&radius_km={km}` - Filtered around a city
+- `GET /api/earthquakes?lat={latitude}&lon={longitude}&radius_km={km}` - Filtered around coordinates
+
 #### Alerts & Location
 - `GET /api/alerts` - Current weather alerts
 - `GET /api/geocoding?location={query}` - Location search and coordinates
@@ -176,6 +183,26 @@ Lightning data follows a similar pattern but with specialized filtering for rece
 ]
 ```
 
+#### Earthquake Response
+```json
+[
+  {
+    "id": "us7000example",
+    "magnitude": 4.7,
+    "place": "12 km NW of Example",
+    "time": "2026-08-11T06:38:56Z",
+    "updated": "2026-08-11T06:42:10Z",
+    "coordinates": {"lon": 10.2, "lat": 59.1},
+    "depth_km": 8.3,
+    "significance": 340,
+    "alert_level": "green",
+    "status": "reviewed",
+    "tsunami": false,
+    "details_url": "https://earthquake.usgs.gov/earthquakes/eventpage/us7000example"
+  }
+]
+```
+
 ## Data Sources
 
 ### MET Norway (Meteorologisk Institutt)
@@ -196,6 +223,12 @@ Lightning data follows a similar pattern but with specialized filtering for rece
 - **Format**: Historical data in 24-hour windows
 - **Usage**: Lightning monitoring and alerts
 
+### Earthquake Data (USGS)
+- **API**: https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php
+- **Data**: Global earthquakes from the versioned `all_day` GeoJSON feed
+- **Update cadence**: Every minute
+- **Usage**: Recent earthquake monitoring with local WICTK filtering
+
 ## Caching Strategy
 
 ### Cache Configuration
@@ -203,6 +236,7 @@ Lightning data follows a similar pattern but with specialized filtering for rece
 - **Nowcast Cache**: 20 entries, 5-minute TTL
 - **Alert Cache**: 1 entry, 5-minute TTL
 - **Lightning Cache**: 1 entry, 5-minute TTL
+- **Earthquake Cache**: 1 entry, 1-minute TTL
 
 ### Cache Keys
 - Location-based: `{provider}_{location}_{radius}`
@@ -240,6 +274,7 @@ OPENWEATHERMAPAPIKEY=your_api_key
 # Optional
 HOST=0.0.0.0:3000
 LOG_LEVEL=info
+USGS_EARTHQUAKE_FEED_URL=https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson
 ```
 
 ### Health Checks
@@ -325,4 +360,5 @@ OPENWEATHERMAPAPIKEY=xxx cargo run --bin backend
 
 # Test API
 curl "http://localhost:3000/api/nowcasts?location=Oslo"
+curl "http://localhost:3000/api/earthquakes?min_magnitude=4.5&limit=20"
 ```

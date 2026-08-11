@@ -68,6 +68,23 @@ async fn main() -> Result<()> {
         Err(e) => tracing::warn!("Failed to fetch weather alerts from backend: {}", e),
     }
 
+    match weather_client
+        .get_earthquakes(&opts.service_url, "Japan", 2000.0)
+        .await
+    {
+        Ok(earthquakes) if earthquakes.is_empty() => {
+            tracing::info!("No recent earthquakes found near Japan");
+        }
+        Ok(earthquakes) => {
+            tracing::warn!(
+                earthquake_count = earthquakes.len(),
+                earthquakes = ?earthquakes,
+                "Recent earthquakes found near Japan"
+            );
+        }
+        Err(e) => tracing::warn!("Failed to check for earthquakes near Japan: {}", e),
+    }
+
     // Process each location
     for location in &opts.locations {
         tracing::info!("Processing location: {}", location);

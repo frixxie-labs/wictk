@@ -6,6 +6,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use earthquakes::get_earthquakes;
 use lightning::get_recent_lightning;
 use metrics::histogram;
 use metrics_exporter_prometheus::PrometheusHandle;
@@ -15,8 +16,9 @@ use tower::ServiceBuilder;
 use tracing::{info, instrument};
 use utoipa::OpenApi;
 use wictk_core::{
-    Alert, Area, City, Coordinates, CoordinatesAsString, Lightning, MetAlert, MetNowcast, Nowcast,
-    OpenWeatherMapLocation, OpenWeatherNowcast, Severity, TimeDuration,
+    Alert, Area, City, Coordinates, CoordinatesAsString, Earthquake, EarthquakeAlertLevel,
+    EarthquakeStatus, Lightning, MetAlert, MetNowcast, Nowcast, OpenWeatherMapLocation,
+    OpenWeatherNowcast, Severity, TimeDuration,
 };
 
 use self::{
@@ -26,6 +28,7 @@ use self::{
 };
 
 mod alerts;
+mod earthquakes;
 mod error;
 mod lightning;
 mod location;
@@ -48,6 +51,7 @@ pub use alerts::Alerts;
         nowcasts::nowcasts,
         location::geocoding,
         lightning::get_recent_lightning,
+        earthquakes::get_earthquakes,
         openapi,
     ),
     components(
@@ -61,6 +65,9 @@ pub use alerts::Alerts;
             Area,
             TimeDuration,
             Lightning,
+            Earthquake,
+            EarthquakeAlertLevel,
+            EarthquakeStatus,
             Coordinates,
             CoordinatesAsString,
             City,
@@ -69,6 +76,7 @@ pub use alerts::Alerts;
             nowcasts::LocationParams,
             alerts::AlertQuery,
             lightning::LightningQuery,
+            earthquakes::EarthquakeQuery,
         )
     ),
     tags(
@@ -77,11 +85,12 @@ pub use alerts::Alerts;
         (name = "alerts", description = "Weather alert endpoints"),
         (name = "geocoding", description = "Geocoding endpoints"),
         (name = "lightning", description = "Lightning data endpoints"),
+        (name = "earthquakes", description = "Recent earthquake endpoints"),
         (name = "documentation", description = "API documentation endpoints"),
     ),
     info(
-        title = "WICTK Weather API",
-        description = "Weather Information and Climate Toolkit API",
+        title = "WICTK API",
+        description = "Weather and environmental event API",
         version = "0.20.1"
     )
 )]
@@ -121,6 +130,7 @@ pub fn setup_router(app_state: AppState, metrics_handler: PrometheusHandle) -> R
         .route("/nowcasts", get(nowcasts))
         .route("/geocoding", get(geocoding))
         .route("/recent_lightning", get(get_recent_lightning))
+        .route("/earthquakes", get(get_earthquakes))
         .with_state(app_state);
 
     let status = Router::new()

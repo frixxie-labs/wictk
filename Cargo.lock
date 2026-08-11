@@ -244,6 +244,7 @@ dependencies = [
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "mockito",
  "moka",
  "once_cell",
  "pretty_assertions",
