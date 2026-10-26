@@ -1580,8 +1580,10 @@ name = "notifier"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "mockito",
+ "quickcheck",
  "reqwest",
  "serde",
  "serde_json",
