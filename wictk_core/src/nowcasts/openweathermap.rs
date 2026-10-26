@@ -1,14 +1,15 @@
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use redact::Secret;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::error;
 use utoipa::ToSchema;
 
 use crate::locations::Coordinates;
 
-use super::{Nowcast, NowcastError};
+use super::Nowcast;
+
+pub const OPENWEATHERMAP_NOWCAST_URL: &str = "https://api.openweathermap.org/data/2.5/weather";
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct OpenWeatherNowcast {
@@ -53,80 +54,82 @@ impl std::fmt::Display for OpenWeatherNowcast {
     }
 }
 
-impl TryFrom<Value> for OpenWeatherNowcast {
-    type Error = NowcastError;
+#[derive(Deserialize)]
+struct OwmResponse {
+    #[serde(with = "chrono::serde::ts_seconds")]
+    dt: DateTime<Utc>,
+    name: String,
+    sys: OwmSys,
+    coord: OwmCoord,
+    weather: Vec<OwmWeather>,
+    clouds: OwmClouds,
+    wind: OwmWind,
+    visibility: i32,
+    main: OwmMain,
+}
 
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let dt = DateTime::from_timestamp(
-            value["dt"]
-                .as_i64()
-                .ok_or(NowcastError::new("Could not find dt"))?,
-            0,
-        )
-        .ok_or(NowcastError::new("Could not find dt"))?;
-        let name = value["name"]
-            .as_str()
-            .ok_or(NowcastError::new("Could not find name"))?
-            .to_string();
-        let country = value["sys"]["country"]
-            .as_str()
-            .ok_or(NowcastError::new("Could not find country"))?
-            .to_string();
-        let lon = value["coord"]["lon"]
-            .as_f64()
-            .ok_or(NowcastError::new("Could not find lon"))? as f32;
-        let lat = value["coord"]["lat"]
-            .as_f64()
-            .ok_or(NowcastError::new("Could not find lat"))? as f32;
-        let main = value["weather"][0]["main"]
-            .as_str()
-            .ok_or(NowcastError::new("Could not find main"))?
-            .to_string();
-        let desc = value["weather"][0]["description"]
-            .as_str()
-            .ok_or(NowcastError::new("Could not find desc"))?
-            .to_string();
-        let clouds = value["clouds"]["all"]
-            .as_u64()
-            .ok_or(NowcastError::new("Could not find clouds"))? as u32;
-        let wind_speed = value["wind"]["speed"]
-            .as_f64()
-            .ok_or(NowcastError::new("Could not find wind_speed"))? as f32;
-        let wind_deg = value["wind"]["deg"]
-            .as_i64()
-            .ok_or(NowcastError::new("Could not find wind_deg"))? as i32;
-        let visibility = value["visibility"]
-            .as_i64()
-            .ok_or(NowcastError::new("Could not find visibility"))? as i32;
-        let temp = value["main"]["temp"]
-            .as_f64()
-            .ok_or(NowcastError::new("Could not find temp"))? as f32;
-        let feels_like = value["main"]["feels_like"]
-            .as_f64()
-            .ok_or(NowcastError::new("Could not find feels_like"))? as f32;
-        let humidity = value["main"]["humidity"]
-            .as_u64()
-            .ok_or(NowcastError::new("Could not find humidity"))? as u32;
-        let pressure = value["main"]["pressure"]
-            .as_u64()
-            .ok_or(NowcastError::new("Could not find pressure"))? as u32;
+#[derive(Deserialize)]
+struct OwmSys {
+    country: String,
+}
+
+#[derive(Deserialize)]
+struct OwmCoord {
+    lon: f32,
+    lat: f32,
+}
+
+#[derive(Deserialize)]
+struct OwmWeather {
+    main: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct OwmClouds {
+    all: u32,
+}
+
+#[derive(Deserialize)]
+struct OwmWind {
+    speed: f32,
+    deg: i32,
+}
+
+#[derive(Deserialize)]
+struct OwmMain {
+    temp: f32,
+    feels_like: f32,
+    humidity: u32,
+    pressure: u32,
+}
+
+impl TryFrom<OwmResponse> for OpenWeatherNowcast {
+    type Error = anyhow::Error;
+
+    fn try_from(response: OwmResponse) -> Result<Self> {
+        let weather = response
+            .weather
+            .into_iter()
+            .next()
+            .context("OpenWeatherMap response contains no weather description")?;
 
         Ok(Self {
-            dt,
-            name,
-            country,
-            lon,
-            lat,
-            main,
-            desc,
-            clouds,
-            wind_speed,
-            wind_deg,
-            visibility,
-            temp,
-            feels_like,
-            humidity,
-            pressure,
+            dt: response.dt,
+            name: response.name,
+            country: response.sys.country,
+            lon: response.coord.lon,
+            lat: response.coord.lat,
+            main: weather.main,
+            desc: weather.description,
+            clouds: response.clouds.all,
+            wind_speed: response.wind.speed,
+            wind_deg: response.wind.deg,
+            visibility: response.visibility,
+            temp: response.main.temp,
+            feels_like: response.main.feels_like,
+            humidity: response.main.humidity,
+            pressure: response.main.pressure,
         })
     }
 }
@@ -140,46 +143,44 @@ impl From<OpenWeatherNowcast> for Nowcast {
 impl OpenWeatherNowcast {
     pub async fn fetch(
         client: &Client,
+        url: &str,
         location: &Coordinates,
         apikey: &Secret<String>,
-    ) -> Result<Nowcast, NowcastError> {
-        let openweathermap: OpenWeatherNowcast = client
-            .get("https://api.openweathermap.org/data/2.5/weather")
-            .query(&[("lat", location.lat), ("lon", location.lon)])
-            .query(&[("appid", apikey.expose_secret())])
-            .query(&[("units", "metric")])
+    ) -> Result<Nowcast> {
+        let response = client
+            .get(url)
+            .query(&[("lat", location.lat()), ("lon", location.lon())])
+            .query(&[
+                ("appid", apikey.expose_secret().as_str()),
+                ("units", "metric"),
+            ])
             .send()
             .await
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Request to OpenWeatherMap failed")
-            })?
-            .json::<Value>()
+            .context("Request to OpenWeatherMap failed")?
+            .error_for_status()
+            .context("OpenWeatherMap nowcast returned an error")?
+            .json::<OwmResponse>()
             .await
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Deserialization from OpenWeatherMap failed")
-            })?
-            .try_into()
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Failed to convert OpenWeatherMap value into nowcast type")
-            })?;
-        Ok(openweathermap.into())
+            .context("Deserialization from OpenWeatherMap failed")?;
+
+        Ok(OpenWeatherNowcast::try_from(response)?.into())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::nowcasts::OpenWeatherNowcast;
+    use super::*;
+    use serde_json::{json, Value};
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/openweathermap_nowcast.json");
+
+    fn parse(value: Value) -> Result<OpenWeatherNowcast> {
+        OpenWeatherNowcast::try_from(serde_json::from_value::<OwmResponse>(value)?)
+    }
 
     #[test]
-    fn open_weathermap_from_value() {
-        let json = r#"{"coord":{"lon":10.3951,"lat":63.4305},"weather":[{"id":804,"main":"Clouds","description":"overcast clouds","icon":"04d"}],"base":"stations","main":{"temp":15.21,"feels_like":15.19,"temp_min":14.99,"temp_max":16.05,"pressure":1014,"humidity":92},"visibility":10000,"wind":{"speed":0.89,"deg":270,"gust":2.68},"clouds":{"all":99},"dt":1692185222,"sys":{"type":2,"id":2046252,"country":"NO","sunrise":1692155757,"sunset":1692214194},"timezone":7200,"id":3133880,"name":"Trondheim","cod":200}"#;
-
-        let json_value: serde_json::Value = serde_json::from_str(json).unwrap();
-
-        let open_weather = OpenWeatherNowcast::try_from(json_value).unwrap();
+    fn parses_nowcast() -> Result<()> {
+        let open_weather = parse(serde_json::from_str(FIXTURE)?)?;
 
         assert_eq!(open_weather.dt.timestamp(), 1692185222);
         assert_eq!(open_weather.name, "Trondheim");
@@ -196,5 +197,46 @@ mod tests {
         assert_eq!(open_weather.feels_like, 15.19);
         assert_eq!(open_weather.humidity, 92);
         assert_eq!(open_weather.pressure, 1014);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_empty_weather_list() -> Result<()> {
+        let mut value: Value = serde_json::from_str(FIXTURE)?;
+        value["weather"] = json!([]);
+
+        assert!(parse(value).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_fields() -> Result<()> {
+        let mut value: Value = serde_json::from_str(FIXTURE)?;
+        value.as_object_mut().unwrap().remove("main");
+
+        assert!(parse(value).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rejects_unsuccessful_response() -> Result<()> {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/weather")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .create_async()
+            .await;
+
+        let result = OpenWeatherNowcast::fetch(
+            &Client::new(),
+            &format!("{}/weather", server.url()),
+            &Coordinates::new(10.0, 60.0)?,
+            &Secret::new("key".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        Ok(())
     }
 }

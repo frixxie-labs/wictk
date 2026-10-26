@@ -68,17 +68,27 @@ impl Earthquake {
 #[derive(Debug, Deserialize)]
 struct UsgsFeatureCollection {
     #[serde(rename = "type")]
-    collection_type: String,
+    _type: FeatureCollectionTag,
     features: Vec<UsgsFeature>,
+}
+
+#[derive(Debug, Deserialize)]
+enum FeatureCollectionTag {
+    FeatureCollection,
 }
 
 #[derive(Debug, Deserialize)]
 struct UsgsFeature {
     #[serde(rename = "type")]
-    feature_type: String,
+    _type: FeatureTag,
     id: String,
     properties: UsgsProperties,
     geometry: UsgsGeometry,
+}
+
+#[derive(Debug, Deserialize)]
+enum FeatureTag {
+    Feature,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,27 +103,28 @@ struct UsgsProperties {
     status: EarthquakeStatus,
     tsunami: u8,
     #[serde(rename = "type")]
-    event_type: String,
+    event_type: UsgsEventType,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum UsgsEventType {
+    Earthquake,
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
-struct UsgsGeometry {
-    #[serde(rename = "type")]
-    geometry_type: String,
-    coordinates: Vec<f64>,
+#[serde(tag = "type")]
+enum UsgsGeometry {
+    /// `[longitude, latitude, depth_km]`
+    Point { coordinates: (f64, f64, f64) },
 }
 
 fn parse_feed(feed: UsgsFeatureCollection) -> Result<Vec<Earthquake>> {
-    if feed.collection_type != "FeatureCollection" {
-        bail!(
-            "Expected a GeoJSON FeatureCollection, got {}",
-            feed.collection_type
-        );
-    }
-
     feed.features
         .into_iter()
-        .filter(|feature| feature.properties.event_type == "earthquake")
+        .filter(|feature| feature.properties.event_type == UsgsEventType::Earthquake)
         .map(Earthquake::try_from)
         .collect()
 }
@@ -122,38 +133,14 @@ impl TryFrom<UsgsFeature> for Earthquake {
     type Error = anyhow::Error;
 
     fn try_from(feature: UsgsFeature) -> Result<Self> {
-        if feature.feature_type != "Feature" {
-            bail!(
-                "Expected event {} to be a GeoJSON Feature, got {}",
-                feature.id,
-                feature.feature_type
-            );
+        let UsgsGeometry::Point {
+            coordinates: (longitude, latitude, depth_km),
+        } = feature.geometry;
+        if !depth_km.is_finite() {
+            bail!("Event {} contains an invalid depth", feature.id);
         }
-        if feature.geometry.geometry_type != "Point" {
-            bail!(
-                "Expected event {} to use Point geometry, got {}",
-                feature.id,
-                feature.geometry.geometry_type
-            );
-        }
-        if feature.geometry.coordinates.len() != 3 {
-            bail!(
-                "Expected event {} to contain longitude, latitude, and depth",
-                feature.id
-            );
-        }
-
-        let longitude = feature.geometry.coordinates[0];
-        let latitude = feature.geometry.coordinates[1];
-        let depth_km = feature.geometry.coordinates[2];
-        if !longitude.is_finite()
-            || !latitude.is_finite()
-            || !depth_km.is_finite()
-            || !(-180.0..=180.0).contains(&longitude)
-            || !(-90.0..=90.0).contains(&latitude)
-        {
-            bail!("Event {} contains invalid coordinates", feature.id);
-        }
+        let coordinates = Coordinates::new(longitude as f32, latitude as f32)
+            .with_context(|| format!("Event {} contains invalid coordinates", feature.id))?;
 
         let time = DateTime::<Utc>::from_timestamp_millis(feature.properties.time)
             .with_context(|| format!("Event {} contains an invalid time", feature.id))?;
@@ -174,7 +161,7 @@ impl TryFrom<UsgsFeature> for Earthquake {
             place: feature.properties.place,
             time,
             updated,
-            coordinates: Coordinates::new(longitude as f32, latitude as f32),
+            coordinates,
             depth_km,
             significance: feature.properties.sig,
             alert_level: feature.properties.alert,
@@ -248,7 +235,7 @@ mod tests {
         assert_eq!(earthquake.id, "us-test");
         assert_eq!(earthquake.magnitude, Some(4.7));
         assert_eq!(earthquake.place.as_deref(), Some("12 km NW of Example"));
-        assert_eq!(earthquake.coordinates, Coordinates::new(10.2, 59.1));
+        assert_eq!(earthquake.coordinates, Coordinates::new(10.2, 59.1)?);
         assert_eq!(earthquake.depth_km, 8.3);
         assert_eq!(earthquake.significance, Some(340));
         assert_eq!(earthquake.alert_level, Some(EarthquakeAlertLevel::Green));
@@ -284,6 +271,23 @@ mod tests {
         }))));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_range_coordinates() {
+        let result = parse(feed(feature(json!({
+            "geometry": { "coordinates": [10.2, 91.0, 8.3] }
+        }))));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_non_feature_collection() {
+        let mut value = feed(feature(json!({})));
+        value["type"] = json!("Feature");
+
+        assert!(parse(value).is_err());
     }
 
     #[test]

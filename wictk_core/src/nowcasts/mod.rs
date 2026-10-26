@@ -1,10 +1,10 @@
 mod met;
 mod openweathermap;
 
-pub use met::MetNowcast;
-pub use openweathermap::OpenWeatherNowcast;
+pub use met::{MetNowcast, MET_NOWCAST_URL};
+pub use openweathermap::{OpenWeatherNowcast, OPENWEATHERMAP_NOWCAST_URL};
 
-use std::{error::Error, fmt::Display};
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -38,24 +38,3 @@ impl Display for Nowcast {
         }
     }
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NowcastError {
-    pub message: String,
-}
-
-impl NowcastError {
-    pub fn new(message: &str) -> Self {
-        Self {
-            message: message.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for NowcastError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "NowcastError: {}", self.message)
-    }
-}
-
-impl Error for NowcastError {}

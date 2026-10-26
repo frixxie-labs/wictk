@@ -1,13 +1,14 @@
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tracing::error;
 use utoipa::ToSchema;
 
 use crate::locations::Coordinates;
 
-use super::{Nowcast, NowcastError};
+use super::Nowcast;
+
+pub const MET_NOWCAST_URL: &str = "https://api.met.no/weatherapi/nowcast/2.0/complete";
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MetNowcast {
@@ -41,71 +42,110 @@ impl std::fmt::Display for MetNowcast {
     }
 }
 
-impl TryFrom<serde_json::Value> for MetNowcast {
-    type Error = NowcastError;
+#[derive(Deserialize)]
+struct MetResponse {
+    geometry: MetGeometry,
+    properties: MetProperties,
+}
 
-    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
-        let location = value["geometry"]["coordinates"]
-            .as_array()
-            .ok_or_else(|| NowcastError::new("Could not find location"))?;
-        let location = Coordinates::new(
-            location[0].as_f64().unwrap() as f32,
-            location[1].as_f64().unwrap() as f32,
-        );
+#[derive(Deserialize)]
+struct MetGeometry {
+    coordinates: Vec<f32>,
+}
 
-        let time = value["properties"]["meta"]["updated_at"]
-            .as_str()
-            .ok_or_else(|| NowcastError::new("Could not find time"))?;
+#[derive(Deserialize)]
+struct MetProperties {
+    meta: MetMeta,
+    timeseries: Vec<MetTimeStep>,
+}
 
-        let description = value["properties"]["timeseries"][0]["data"]["next_1_hours"]["summary"]
-            ["symbol_code"]
-            .as_str()
-            .ok_or_else(|| NowcastError::new("Could not find description"))?;
+#[derive(Deserialize)]
+struct MetMeta {
+    updated_at: DateTime<Utc>,
+}
 
-        let air_temperature = value["properties"]["timeseries"][0]["data"]["instant"]["details"]
-            ["air_temperature"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find air_temperature"))?;
+#[derive(Deserialize)]
+struct MetTimeStep {
+    data: MetStepData,
+}
 
-        let relative_humidity = value["properties"]["timeseries"][0]["data"]["instant"]["details"]
-            ["relative_humidity"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find relative_humidity"))?;
+/// Only the first time step carries the full set of values.
+#[derive(Deserialize)]
+struct MetStepData {
+    instant: MetInstant,
+    next_1_hours: Option<MetNextHour>,
+}
 
-        let precipitation_amount = value["properties"]["timeseries"][0]["data"]["next_1_hours"]
-            ["details"]["precipitation_amount"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find precipitation_amount"))?;
+#[derive(Deserialize)]
+struct MetInstant {
+    details: MetInstantDetails,
+}
 
-        let wind_speed = value["properties"]["timeseries"][0]["data"]["instant"]["details"]
-            ["wind_speed"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find wind_speed"))?;
+#[derive(Deserialize)]
+struct MetInstantDetails {
+    air_temperature: Option<f32>,
+    relative_humidity: Option<f32>,
+    precipitation_rate: Option<f32>,
+    wind_speed: Option<f32>,
+    wind_speed_of_gust: Option<f32>,
+    wind_from_direction: Option<f32>,
+}
 
-        let wind_speed_gust = value["properties"]["timeseries"][0]["data"]["instant"]["details"]
-            ["wind_speed_of_gust"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find wind_speed_of_gust"))?;
+#[derive(Deserialize)]
+struct MetNextHour {
+    summary: MetSummary,
+    details: MetNextHourDetails,
+}
 
-        let wind_from_direction = value["properties"]["timeseries"][0]["data"]["instant"]
-            ["details"]["wind_from_direction"]
-            .as_f64()
-            .ok_or_else(|| NowcastError::new("Could not find wind_from_direction"))?;
+#[derive(Deserialize)]
+struct MetSummary {
+    symbol_code: String,
+}
+
+#[derive(Deserialize)]
+struct MetNextHourDetails {
+    precipitation_amount: f32,
+}
+
+impl TryFrom<MetResponse> for MetNowcast {
+    type Error = anyhow::Error;
+
+    fn try_from(response: MetResponse) -> Result<Self> {
+        let location = match response.geometry.coordinates.as_slice() {
+            [lon, lat, ..] => Coordinates::new(*lon, *lat)?,
+            _ => bail!("Expected longitude and latitude in nowcast geometry"),
+        };
+        let current = response
+            .properties
+            .timeseries
+            .into_iter()
+            .next()
+            .context("Nowcast contains no time steps")?
+            .data;
+        let next_hour = current
+            .next_1_hours
+            .context("Nowcast is missing next_1_hours")?;
+        let details = current.instant.details;
 
         Ok(Self {
+            time: response.properties.meta.updated_at,
             location,
-            time: time
-                .to_string()
-                .parse()
-                .map_err(|_| NowcastError::new("Failed to parse time"))?,
-            description: description.to_string(),
-            air_temperature: air_temperature as f32,
-            relative_humidity: relative_humidity as f32,
-            precipitation_rate: precipitation_amount as f32,
-            precipitation_amount: precipitation_amount as f32,
-            wind_speed: wind_speed as f32,
-            wind_speed_gust: wind_speed_gust as f32,
-            wind_from_direction: wind_from_direction as f32,
+            description: next_hour.summary.symbol_code,
+            air_temperature: details.air_temperature.context("Missing air_temperature")?,
+            relative_humidity: details
+                .relative_humidity
+                .context("Missing relative_humidity")?,
+            precipitation_rate: details
+                .precipitation_rate
+                .context("Missing precipitation_rate")?,
+            precipitation_amount: next_hour.details.precipitation_amount,
+            wind_speed: details.wind_speed.context("Missing wind_speed")?,
+            wind_speed_gust: details
+                .wind_speed_of_gust
+                .context("Missing wind_speed_of_gust")?,
+            wind_from_direction: details
+                .wind_from_direction
+                .context("Missing wind_from_direction")?,
         })
     }
 }
@@ -117,45 +157,39 @@ impl From<MetNowcast> for Nowcast {
 }
 
 impl MetNowcast {
-    pub async fn fetch(client: &Client, location: &Coordinates) -> Result<Nowcast, NowcastError> {
-        let met_cast: MetNowcast = client
-            .get("https://api.met.no/weatherapi/nowcast/2.0/complete")
-            .query(&[("lat", location.lat), ("lon", location.lon)])
+    pub async fn fetch(client: &Client, url: &str, location: &Coordinates) -> Result<Nowcast> {
+        let response = client
+            .get(url)
+            .query(&[("lat", location.lat()), ("lon", location.lon())])
             .send()
             .await
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Request to Met.no failed")
-            })?
-            .json::<Value>()
+            .context("Request to Met.no failed")?
+            .error_for_status()
+            .context("Met.no nowcast returned an error")?
+            .json::<MetResponse>()
             .await
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Deserialization from Met.no failed")
-            })?
-            .try_into()
-            .map_err(|err| {
-                error!("Error {}", err);
-                NowcastError::new("Failed to convert from met value into nowcast type")
-            })?;
-        Ok(met_cast.into())
+            .context("Deserialization from Met.no failed")?;
+
+        Ok(MetNowcast::try_from(response)?.into())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/met_nowcast.json");
+
+    fn parse(value: Value) -> Result<MetNowcast> {
+        MetNowcast::try_from(serde_json::from_value::<MetResponse>(value)?)
+    }
 
     #[test]
-    fn met_test_from_value() {
-        let json = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[10.4034,63.4308,0]},"properties":{"meta":{"updated_at":"2023-08-14T18:16:07Z","units":{"air_temperature":"celsius","precipitation_amount":"mm","precipitation_rate":"mm/h","relative_humidity":"%","wind_from_direction":"degrees","wind_speed":"m/s","wind_speed_of_gust":"m/s"},"radar_coverage":"ok"},"timeseries":[{"time":"2023-08-14T18:15:00Z","data":{"instant":{"details":{"air_temperature":17.7,"precipitation_rate":0.0,"relative_humidity":80.5,"wind_from_direction":294.4,"wind_speed":2.7,"wind_speed_of_gust":6.1}},"next_1_hours":{"summary":{"symbol_code":"cloudy"},"details":{"precipitation_amount":0.0}}}},{"time":"2023-08-14T18:20:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:25:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:30:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:35:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:40:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:45:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:50:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T18:55:00Z","data":{"instant":{"details":{"precipitation_rate":0.0}}}},{"time":"2023-08-14T19:00:00Z","data":{"instant":{"details":{"precipitation_rate":0.2}}}},{"time":"2023-08-14T19:05:00Z","data":{"instant":{"details":{"precipitation_rate":0.5}}}},{"time":"2023-08-14T19:10:00Z","data":{"instant":{"details":{"precipitation_rate":0.7}}}},{"time":"2023-08-14T19:15:00Z","data":{"instant":{"details":{"precipitation_rate":0.9}}}},{"time":"2023-08-14T19:20:00Z","data":{"instant":{"details":{"precipitation_rate":1.1}}}},{"time":"2023-08-14T19:25:00Z","data":{"instant":{"details":{"precipitation_rate":1.4}}}},{"time":"2023-08-14T19:30:00Z","data":{"instant":{"details":{"precipitation_rate":1.6}}}},{"time":"2023-08-14T19:35:00Z","data":{"instant":{"details":{"precipitation_rate":1.8}}}},{"time":"2023-08-14T19:40:00Z","data":{"instant":{"details":{"precipitation_rate":1.8}}}},{"time":"2023-08-14T19:45:00Z","data":{"instant":{"details":{"precipitation_rate":1.9}}}},{"time":"2023-08-14T19:50:00Z","data":{"instant":{"details":{"precipitation_rate":1.9}}}},{"time":"2023-08-14T19:55:00Z","data":{"instant":{"details":{"precipitation_rate":1.9}}}},{"time":"2023-08-14T20:00:00Z","data":{"instant":{"details":{"precipitation_rate":2.0}}}},{"time":"2023-08-14T20:05:00Z","data":{"instant":{"details":{"precipitation_rate":2.5}}}}]}}"#;
+    fn parses_nowcast() -> Result<()> {
+        let met = parse(serde_json::from_str(FIXTURE)?)?;
 
-        let json_value: serde_json::Value = serde_json::from_str(json).unwrap();
-
-        let met = MetNowcast::try_from(json_value).unwrap();
-
-        assert_eq!(met.location.lat, 63.4308);
-        assert_eq!(met.location.lon, 10.4034);
+        assert_eq!(met.location, Coordinates::new(10.4034, 63.4308)?);
         assert_eq!(met.time.to_string(), "2023-08-14 18:16:07 UTC");
         assert_eq!(met.description, "cloudy");
         assert_eq!(met.air_temperature, 17.7);
@@ -164,47 +198,68 @@ mod tests {
         assert_eq!(met.wind_speed, 2.7);
         assert_eq!(met.wind_speed_gust, 6.1);
         assert_eq!(met.wind_from_direction, 294.4);
+        Ok(())
+    }
+
+    #[test]
+    fn reads_precipitation_rate_separately_from_amount() -> Result<()> {
+        let mut value: Value = serde_json::from_str(FIXTURE)?;
+        value["properties"]["timeseries"][0]["data"]["instant"]["details"]["precipitation_rate"] =
+            json!(1.5);
+        value["properties"]["timeseries"][0]["data"]["next_1_hours"]["details"]
+            ["precipitation_amount"] = json!(0.25);
+
+        let met = parse(value)?;
+
+        assert_eq!(met.precipitation_rate, 1.5);
+        assert_eq!(met.precipitation_amount, 0.25);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_short_coordinates_instead_of_panicking() -> Result<()> {
+        let mut value: Value = serde_json::from_str(FIXTURE)?;
+        value["geometry"]["coordinates"] = json!([10.4]);
+
+        assert!(parse(value).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_values() -> Result<()> {
+        let mut value: Value = serde_json::from_str(FIXTURE)?;
+        value["properties"]["timeseries"][0]["data"]["instant"]["details"]
+            .as_object_mut()
+            .unwrap()
+            .remove("wind_speed");
+
+        assert!(parse(value).is_err());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn met_fetch() {
-        let client_builder = reqwest::Client::builder();
-        static APP_USER_AGENT: &str = concat!(
-            env!("CARGO_PKG_NAME"),
-            "/",
-            env!("CARGO_PKG_VERSION"),
-            " ",
-            env!("CARGO_PKG_HOMEPAGE"),
-        );
-        let client = client_builder.user_agent(APP_USER_AGENT).build().unwrap();
-
-        // First check if we can reach the API
-        let ping_result = client
-            .head("https://api.met.no/weatherapi/locationforecast/2.0/complete?lat=63.4308&lon=10.4034")
-            .send()
+    async fn fetches_nowcast() -> Result<()> {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/nowcast")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("lat".into(), "63.4308".into()),
+                mockito::Matcher::UrlEncoded("lon".into(), "10.4034".into()),
+            ]))
+            .with_status(200)
+            .with_body(FIXTURE)
+            .create_async()
             .await;
 
-        if ping_result.is_err() {
-            // Skip test if API is unreachable
-            eprintln!(
-                "Skipping met_fetch test - API unreachable: {:?}",
-                ping_result.unwrap_err()
-            );
-            return;
-        }
+        let nowcast = MetNowcast::fetch(
+            &Client::new(),
+            &format!("{}/nowcast", server.url()),
+            &Coordinates::new(10.4034, 63.4308)?,
+        )
+        .await?;
 
-        let location = Coordinates::new(10.4034, 63.4308);
-        let nowcast = MetNowcast::fetch(&client, &location).await;
-        match &nowcast {
-            Ok(_) => {
-                // Test passed
-                assert!(true);
-            }
-            Err(e) => {
-                eprintln!("met_fetch test failed with error: {}", e);
-                // Don't fail the test, just log the error
-                // This makes the test more resilient to temporary API issues
-            }
-        }
+        mock.assert_async().await;
+        assert!(matches!(nowcast, Nowcast::Met(_)));
+        Ok(())
     }
 }
