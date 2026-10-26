@@ -3,213 +3,198 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use geo::{Point, Polygon};
-use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
-use tracing::{error, instrument};
-use utoipa::{IntoParams, ToSchema};
-use wictk_core::{Alert, Area, Coordinates, MetAlert};
+use geo::{Contains, LineString, Point, Polygon};
+use tracing::instrument;
+use wictk_core::{Alert, Area, MetAlert};
 
 use super::{
+    cache::get_or_fetch,
     error::ApplicationError,
-    nowcasts::{find_location, LocationQuery},
+    location::{resolve_location, LocationParams},
 };
 
 pub type Alerts = Vec<Alert>;
-
-#[derive(Debug, Serialize, Deserialize, ToSchema, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct AlertQuery {
-    /// Optional location name (e.g., "Oslo")
-    pub location: Option<String>,
-    /// Optional latitude coordinate
-    pub lat: Option<String>,
-    /// Optional longitude coordinate  
-    pub lon: Option<String>,
-}
-
-impl AlertQuery {
-    fn into_location_query(self) -> Option<LocationQuery> {
-        if let Some(location) = self.location {
-            Some(LocationQuery::Location(wictk_core::City { location }))
-        } else if let (Some(lat), Some(lon)) = (self.lat, self.lon) {
-            Some(LocationQuery::Coordinates(
-                wictk_core::CoordinatesAsString { lat, lon },
-            ))
-        } else {
-            None
-        }
-    }
-}
 
 fn point_in_polygon(point: &Point, polygon_points: &[Point]) -> bool {
     if polygon_points.len() < 3 {
         return false;
     }
-
-    // Convert to geo::Polygon for point-in-polygon test
-    let exterior_coords: Vec<geo::Coord> = polygon_points
-        .iter()
-        .map(|p| geo::Coord::from(*p))
-        .collect();
-
-    // Need at least 4 points to close the polygon (first and last must be same)
-    let mut coords = exterior_coords;
-    if coords.first() != coords.last() {
-        if let Some(first) = coords.first() {
-            coords.push(*first);
-        }
-    }
-
-    if coords.len() < 4 {
-        return false;
-    }
-
-    let line_string = geo::LineString::from(coords);
-    let polygon = Polygon::new(line_string, vec![]);
-
-    use geo::Contains;
-    polygon.contains(point)
+    // `Polygon::new` closes the ring if needed.
+    let exterior: LineString = polygon_points.iter().copied().collect();
+    Polygon::new(exterior, vec![]).contains(point)
 }
 
-fn alert_contains_location(alert: &Alert, location: &Coordinates) -> bool {
-    let point = Point::new(location.lon as f64, location.lat as f64);
-
-    match alert {
-        Alert::Met(met_alert) => match &met_alert.area {
-            Area::Single(polygon_points) => point_in_polygon(&point, polygon_points),
-            Area::Multiple(polygons) => polygons
-                .iter()
-                .any(|polygon_points| point_in_polygon(&point, polygon_points)),
-        },
-        Alert::Nve => false, // NVE alerts not implemented yet
+fn alert_contains_point(alert: &Alert, point: &Point) -> bool {
+    let Alert::Met(met_alert) = alert;
+    match &met_alert.area {
+        Area::Single(polygon) => point_in_polygon(point, polygon),
+        Area::Multiple(polygons) => polygons
+            .iter()
+            .any(|polygon| point_in_polygon(point, polygon)),
     }
 }
 
 #[utoipa::path(
     get,
     path = "/api/alerts",
-    params(AlertQuery),
+    params(LocationParams),
     responses(
         (status = 200, description = "List of weather alerts", body = Vec<Alert>),
-        (status = 500, description = "Internal server error", body = String)
+        (status = 400, description = "Invalid location parameters", body = String),
+        (status = 404, description = "Location not found", body = String),
+        (status = 502, description = "Upstream provider failure", body = String)
     ),
     tag = "alerts"
 )]
-#[instrument]
+#[instrument(skip(app_state))]
 pub async fn alerts(
     State(app_state): State<AppState>,
-    Query(alert_query): Query<AlertQuery>,
-) -> Result<Json<Vec<Alert>>, ApplicationError> {
-    let all_alerts = match app_state.alert_cache.get("met_alerts").await {
-        Some(alerts) => alerts.clone(),
-        None => {
-            let alerts = MetAlert::fetch(app_state.client.clone())
-                .await
-                .map_err(|err| {
-                    error!("Error fetching alerts: {}", err);
-                    ApplicationError::new(
-                        "Failed to get Met.no alerts",
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    )
-                })?;
-            app_state
-                .alert_cache
-                .insert("met_alerts".to_string(), alerts.clone())
-                .await;
-            alerts
-        }
+    Query(params): Query<LocationParams>,
+) -> Result<Json<Alerts>, ApplicationError> {
+    let location = params.parse()?;
+    let all_alerts = get_or_fetch(
+        &app_state.alert_cache,
+        (),
+        MetAlert::fetch(&app_state.client, &app_state.provider_urls.met_alerts),
+        "Met.no alerts",
+    )
+    .await?;
+
+    let Some(location) = location else {
+        return Ok(Json(all_alerts));
     };
+    let point = Point::from(resolve_location(&app_state, location).await?);
 
-    // If no location query is provided, return all alerts
-    let filtered_alerts = match alert_query.into_location_query() {
-        Some(location_query) => {
-            let location = find_location(
-                location_query,
-                &app_state.client,
-                &app_state.location_cache,
-                &app_state.openweathermap_apikey,
-            )
-            .await
-            .map_err(|err| {
-                error!("Error finding location: {:?}", err);
-                ApplicationError::new(&err.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
-            })?;
-
-            // Filter alerts to only those that contain the specified location
-            all_alerts
-                .into_iter()
-                .filter(|alert| alert_contains_location(alert, &location))
-                .collect()
-        }
-        None => all_alerts,
-    };
-
-    Ok(Json(filtered_alerts))
+    Ok(Json(
+        all_alerts
+            .into_iter()
+            .filter(|alert| alert_contains_point(alert, &point))
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::test_utils::{create_test_app, make_request};
+    use crate::handlers::test_utils::{create_test_app_with_state, make_request, test_state};
     use axum::http::StatusCode;
-    use geo::Point;
+    use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use quickcheck::{quickcheck, TestResult};
+    use wictk_core::{AlertEvent, Certainty, Severity, TimeDuration};
 
-    #[tokio::test]
-    async fn test_alerts_endpoint() {
-        let app = create_test_app();
-        let (status, _body) = make_request(app, "/api/alerts").await;
+    const ALERTS_FIXTURE: &str =
+        include_str!("../../../wictk_core/tests/fixtures/met_alerts_multipolygon.json");
 
-        // This might fail due to external API dependency, but should not crash
-        // We're testing the endpoint structure, not the actual Met.no API
-        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    fn square(x: f64, y: f64, size: f64) -> Vec<Point> {
+        vec![
+            Point::new(x, y),
+            Point::new(x + size, y),
+            Point::new(x + size, y + size),
+            Point::new(x, y + size),
+        ]
     }
 
-    #[tokio::test]
-    async fn test_alerts_with_location() {
-        let app = create_test_app();
-        let (status, _body) = make_request(app, "/api/alerts?location=Oslo").await;
+    fn alert(area: Area) -> Alert {
+        Alert::Met(MetAlert {
+            title: "title".to_string(),
+            severity: Severity::Yellow,
+            description: "description".to_string(),
+            certainty: Certainty::Likely,
+            event: AlertEvent::Gale,
+            duration: TimeDuration {
+                from: Utc::now(),
+                until: Utc::now(),
+            },
+            area,
+        })
+    }
 
-        // External API dependency - test endpoint structure
-        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    quickcheck! {
+        fn prop_square_contains_its_center(x: i16, y: i16, size: u8) -> TestResult {
+            if size == 0 {
+                return TestResult::discard();
+            }
+            let (x, y, size) = (x as f64, y as f64, size as f64);
+            let center = Point::new(x + size / 2.0, y + size / 2.0);
+            let outside = Point::new(x + size * 2.0, y + size * 2.0);
+            let polygon = square(x, y, size);
+
+            TestResult::from_bool(
+                point_in_polygon(&center, &polygon) && !point_in_polygon(&outside, &polygon),
+            )
+        }
+
+        fn prop_ring_closure_does_not_change_containment(px: i8, py: i8) -> bool {
+            let point = Point::new(px as f64 / 10.0, py as f64 / 10.0);
+            let open = square(0.0, 0.0, 2.0);
+            let mut closed = open.clone();
+            closed.push(open[0]);
+
+            point_in_polygon(&point, &open) == point_in_polygon(&point, &closed)
+        }
     }
 
     #[test]
-    fn test_point_in_polygon_simple_square() {
-        // Create a simple square polygon: (0,0), (2,0), (2,2), (0,2)
-        let polygon_points = vec![
-            Point::new(0.0, 0.0),
-            Point::new(2.0, 0.0),
-            Point::new(2.0, 2.0),
-            Point::new(0.0, 2.0),
-        ];
-
-        // Point inside the square
-        let inside_point = Point::new(1.0, 1.0);
-        assert_eq!(point_in_polygon(&inside_point, &polygon_points), true);
-
-        // Point outside the square
-        let outside_point = Point::new(3.0, 3.0);
-        assert_eq!(point_in_polygon(&outside_point, &polygon_points), false);
-
-        // Point on the edge should return true (depends on geo implementation)
-        let edge_point = Point::new(0.0, 1.0);
-        let _result = point_in_polygon(&edge_point, &polygon_points);
-        // Note: edge behavior may vary, so we don't assert this
-    }
-
-    #[test]
-    fn test_point_in_polygon_empty() {
-        let polygon_points = vec![];
-        let point = Point::new(1.0, 1.0);
-        assert_eq!(point_in_polygon(&point, &polygon_points), false);
-    }
-
-    #[test]
-    fn test_point_in_polygon_too_few_points() {
-        let polygon_points = vec![Point::new(0.0, 0.0), Point::new(1.0, 1.0)];
+    fn degenerate_polygons_contain_nothing() {
         let point = Point::new(0.5, 0.5);
-        assert_eq!(point_in_polygon(&point, &polygon_points), false);
+        assert!(!point_in_polygon(&point, &[]));
+        assert!(!point_in_polygon(
+            &point,
+            &[Point::new(0.0, 0.0), Point::new(1.0, 1.0)]
+        ));
+    }
+
+    #[test]
+    fn multi_polygon_alert_matches_any_polygon() {
+        let alert = alert(Area::Multiple(vec![
+            square(0.0, 0.0, 1.0),
+            square(10.0, 10.0, 1.0),
+        ]));
+
+        assert!(alert_contains_point(&alert, &Point::new(10.5, 10.5)));
+        assert!(!alert_contains_point(&alert, &Point::new(5.0, 5.0)));
+    }
+
+    #[tokio::test]
+    async fn filters_alerts_by_coordinates() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/alerts")
+            .with_status(200)
+            .with_body(ALERTS_FIXTURE)
+            .expect(1)
+            .create_async()
+            .await;
+        let mut state = test_state();
+        state.provider_urls.met_alerts = format!("{}/alerts", server.url());
+        let app = create_test_app_with_state(state);
+
+        let (all_status, all_body) = make_request(app.clone(), "/api/alerts").await;
+        let (status, body) = make_request(app, "/api/alerts?lat=62.1&lon=5.0").await;
+
+        assert_eq!(all_status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
+        let all: Alerts = serde_json::from_slice(&all_body).unwrap();
+        let filtered: Alerts = serde_json::from_slice(&body).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(filtered.len(), 1);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn maps_provider_failure_to_bad_gateway() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/alerts")
+            .with_status(503)
+            .create_async()
+            .await;
+        let mut state = test_state();
+        state.provider_urls.met_alerts = format!("{}/alerts", server.url());
+
+        let (status, _) = make_request(create_test_app_with_state(state), "/api/alerts").await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
     }
 }

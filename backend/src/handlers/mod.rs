@@ -16,7 +16,7 @@ use tower::ServiceBuilder;
 use tracing::{info, instrument};
 use utoipa::OpenApi;
 use wictk_core::{
-    Alert, Area, City, Coordinates, CoordinatesAsString, Earthquake, EarthquakeAlertLevel,
+    Alert, AlertEvent, Area, Certainty, City, Coordinates, Earthquake, EarthquakeAlertLevel,
     EarthquakeStatus, Lightning, MetAlert, MetNowcast, Nowcast, OpenWeatherMapLocation,
     OpenWeatherNowcast, Severity, TimeDuration,
 };
@@ -28,6 +28,7 @@ use self::{
 };
 
 mod alerts;
+mod cache;
 mod earthquakes;
 mod error;
 mod lightning;
@@ -39,6 +40,7 @@ mod status;
 mod test_utils;
 
 pub use alerts::Alerts;
+pub use nowcasts::NowcastKey;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -62,6 +64,8 @@ pub use alerts::Alerts;
             Alert,
             MetAlert,
             Severity,
+            Certainty,
+            AlertEvent,
             Area,
             TimeDuration,
             Lightning,
@@ -69,12 +73,9 @@ pub use alerts::Alerts;
             EarthquakeAlertLevel,
             EarthquakeStatus,
             Coordinates,
-            CoordinatesAsString,
             City,
             OpenWeatherMapLocation,
-            nowcasts::LocationQuery,
-            nowcasts::LocationParams,
-            alerts::AlertQuery,
+            location::LocationParams,
             lightning::LightningQuery,
             earthquakes::EarthquakeQuery,
         )
@@ -98,8 +99,8 @@ pub struct ApiDoc;
 
 #[instrument]
 pub async fn profile_endpoint(request: Request, next: Next) -> Response {
-    let method = request.method().clone().to_string();
-    let uri = request.uri().clone().to_string();
+    let method = request.method().to_string();
+    let uri = request.uri().to_string();
 
     info!("Handling {} at {}", method, uri);
 
@@ -109,9 +110,7 @@ pub async fn profile_endpoint(request: Request, next: Next) -> Response {
 
     let elapsed = now.elapsed();
 
-    let labels = [("method", method.clone()), ("uri", uri.clone())];
-
-    histogram!("handler", &labels).record(elapsed);
+    histogram!("handler", "method" => method.clone(), "uri" => uri.clone()).record(elapsed);
 
     info!(
         "Finished handling {} at {}, used {} ms",
@@ -169,9 +168,8 @@ mod tests {
     use axum::http::StatusCode;
     use axum::{extract::Query, http::Uri};
     use quickcheck::quickcheck;
-    use wictk_core::{City, CoordinatesAsString};
 
-    use crate::handlers::nowcasts::LocationQuery;
+    use crate::handlers::location::LocationParams;
 
     fn safe_query_value(value: String) -> String {
         value
@@ -223,41 +221,15 @@ mod tests {
     }
 
     quickcheck! {
-        fn prop_parse_location_from_query(location: String) -> bool {
-            let location = safe_query_value(location);
-            let uri: Uri = format!("http://localhost:3000/api/nowcasts?location={location}")
+        fn prop_location_params_parse_from_query(location: String, lat: String, lon: String) -> bool {
+            let (location, lat, lon) = (safe_query_value(location), safe_query_value(lat), safe_query_value(lon));
+            let uri: Uri = format!("http://localhost:3000/api/nowcasts?location={location}&lat={lat}&lon={lon}")
                 .parse()
                 .unwrap();
 
-            let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
+            let query = Query::<LocationParams>::try_from_uri(&uri).unwrap();
 
-            query.0 == LocationQuery::Location(City { location })
-        }
-
-        fn prop_parse_coordinates_from_query(lat: String, lon: String) -> bool {
-            let lat = safe_query_value(lat);
-            let lon = safe_query_value(lon);
-            let uri: Uri = format!("http://localhost:3000/api/nowcasts?lat={lat}&lon={lon}")
-                .parse()
-                .unwrap();
-
-            let query = Query::<LocationQuery>::try_from_uri(&uri).unwrap();
-
-            query.0 == LocationQuery::Coordinates(CoordinatesAsString { lat, lon })
-        }
-
-        fn prop_location_query_deserializes_city(location: String) -> bool {
-            let value = serde_json::json!({ "location": location });
-            let query: LocationQuery = serde_json::from_value(value).unwrap();
-
-            query == LocationQuery::Location(City { location })
-        }
-
-        fn prop_location_query_deserializes_coordinates(lat: String, lon: String) -> bool {
-            let value = serde_json::json!({ "lat": lat, "lon": lon });
-            let query: LocationQuery = serde_json::from_value(value).unwrap();
-
-            query == LocationQuery::Coordinates(CoordinatesAsString { lat, lon })
+            query.0 == LocationParams { location: Some(location), lat: Some(lat), lon: Some(lon) }
         }
     }
 }

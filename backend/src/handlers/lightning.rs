@@ -2,19 +2,21 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use geo::{Distance, Haversine, Point};
-use reqwest::StatusCode;
+use geo::Point;
 use serde::{Deserialize, Serialize};
-use tracing::{error, instrument};
+use tracing::instrument;
 use utoipa::{IntoParams, ToSchema};
 use wictk_core::Lightning;
 
 use crate::AppState;
 
 use super::{
+    cache::get_or_fetch,
     error::ApplicationError,
-    nowcasts::{find_location, LocationQuery},
+    location::{bad_request, resolve_location, within_radius_km, LocationParams},
 };
+
+const DEFAULT_RADIUS_KM: f64 = 50.0;
 
 #[derive(Debug, Serialize, Deserialize, Default, ToSchema, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -29,19 +31,11 @@ pub struct LightningQuery {
     pub radius_km: Option<f64>,
 }
 
-impl LightningQuery {
-    fn into_location_query(self) -> (Option<LocationQuery>, Option<f64>) {
-        let location_query = if let Some(location) = self.location {
-            Some(LocationQuery::Location(wictk_core::City { location }))
-        } else if let (Some(lat), Some(lon)) = (self.lat, self.lon) {
-            Some(LocationQuery::Coordinates(
-                wictk_core::CoordinatesAsString { lat, lon },
-            ))
-        } else {
-            None
-        };
-        (location_query, self.radius_km)
-    }
+fn strikes_within(lightning: Vec<Lightning>, center: Point, radius_km: f64) -> Vec<Lightning> {
+    lightning
+        .into_iter()
+        .filter(|strike| within_radius_km(center, strike.location, radius_km))
+        .collect()
 }
 
 #[utoipa::path(
@@ -50,148 +44,113 @@ impl LightningQuery {
     params(LightningQuery),
     responses(
         (status = 200, description = "List of recent lightning strikes", body = Vec<Lightning>),
-        (status = 500, description = "Internal server error", body = String)
+        (status = 400, description = "Invalid query parameters", body = String),
+        (status = 404, description = "Location not found", body = String),
+        (status = 502, description = "Upstream provider failure", body = String)
     ),
     tag = "lightning"
 )]
-#[instrument]
+#[instrument(skip(app_state))]
 pub async fn get_recent_lightning(
-    app_state: State<AppState>,
+    State(app_state): State<AppState>,
     Query(query): Query<LightningQuery>,
 ) -> Result<Json<Vec<Lightning>>, ApplicationError> {
-    // Get the lightning data first
-    let lightning_data = match app_state.lightning_cache.get("recent_lightning").await {
-        Some(lightning) => lightning,
-        None => {
-            let lightning = Lightning::find_ligntning(
-                &app_state.client,
-                "https://www.yr.no/api/v0/lightning-events?fromHours=24",
-            )
-            .await
-            .map_err(|err| {
-                error!("Error fetching lightning data: {:?}", err);
-                ApplicationError::new(&err.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
-            })?;
-            app_state
-                .lightning_cache
-                .insert("recent_lightning".to_string(), lightning.clone())
-                .await;
-            lightning
-        }
-    };
+    let location = LocationParams {
+        location: query.location,
+        lat: query.lat,
+        lon: query.lon,
+    }
+    .parse()?;
+    let radius_km = query.radius_km.unwrap_or(DEFAULT_RADIUS_KM);
+    if !radius_km.is_finite() || radius_km <= 0.0 {
+        return Err(bad_request("'radius_km' must be a positive number"));
+    }
 
-    // Convert query to location query and radius
-    let (location_query, radius_km) = query.into_location_query();
-
-    // If no location is provided, return all lightning data
-    let Some(location_query) = location_query else {
-        return Ok(Json(lightning_data));
-    };
-
-    // Find the location coordinates
-    let location_coords = find_location(
-        location_query,
-        &app_state.client,
-        &app_state.location_cache,
-        &app_state.openweathermap_apikey,
+    let lightning = get_or_fetch(
+        &app_state.lightning_cache,
+        (),
+        Lightning::fetch(&app_state.client, &app_state.provider_urls.lightning),
+        "lightning data",
     )
-    .await
-    .map_err(|err| {
-        error!("Error finding location: {:?}", err);
-        ApplicationError::new(&err.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
-    })?;
+    .await?;
 
-    // Convert to geo::Point for distance calculations
-    let query_point = Point::new(location_coords.lon as f64, location_coords.lat as f64);
+    let Some(location) = location else {
+        return Ok(Json(lightning));
+    };
+    let center = Point::from(resolve_location(&app_state, location).await?);
 
-    // Default radius to 50km if not specified
-    let radius_meters = radius_km.unwrap_or(50.0) * 1000.0;
-
-    // Filter lightning strikes within the specified radius
-    let filtered_lightning: Vec<Lightning> = lightning_data
-        .into_iter()
-        .filter(|lightning| {
-            let lightning_point = Point::new(lightning.location.x(), lightning.location.y());
-            let distance = Haversine.distance(query_point, lightning_point);
-            distance <= radius_meters
-        })
-        .collect();
-
-    Ok(Json(filtered_lightning))
+    Ok(Json(strikes_within(lightning, center, radius_km)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::test_utils::{create_test_app, make_request};
+    use crate::handlers::test_utils::{
+        create_test_app, create_test_app_with_state, make_request, test_state,
+    };
     use axum::http::StatusCode;
-    use quickcheck::{quickcheck, TestResult};
+    use chrono::Utc;
+    use quickcheck::quickcheck;
 
-    #[tokio::test]
-    async fn test_recent_lightning_endpoint() {
-        let app = create_test_app();
-        let (status, _body) = make_request(app, "/api/recent_lightning").await;
-
-        // External API dependency - test endpoint structure
-        assert!(status == StatusCode::OK || status == StatusCode::INTERNAL_SERVER_ERROR);
+    fn strike(lon: f64, lat: f64) -> Lightning {
+        Lightning::new(Point::new(lon, lat), Utc::now(), 1)
     }
 
     quickcheck! {
-        fn prop_lightning_query_city_deserializes(location: String, radius_km: f64) -> TestResult {
-            if !radius_km.is_finite() {
-                return TestResult::discard();
-            }
+        fn prop_larger_radius_never_returns_fewer_strikes(points: Vec<(i16, i16)>, small: u16, extra: u16) -> bool {
+            let strikes: Vec<Lightning> = points
+                .into_iter()
+                .map(|(lon, lat)| strike(lon as f64 / 200.0, lat as f64 / 400.0))
+                .collect();
+            let center = Point::new(10.0, 60.0);
+            let small = small as f64;
+            let large = small + extra as f64;
 
-            let value = serde_json::json!({ "location": location, "radius_km": radius_km });
-            let query: LightningQuery = serde_json::from_value(value).unwrap();
-
-            TestResult::from_bool(
-                query.location == Some(location)
-                    && query.radius_km == Some(radius_km)
-            )
-        }
-
-        fn prop_lightning_query_coordinates_deserializes(lat: String, lon: String, radius_km: f64) -> TestResult {
-            if !radius_km.is_finite() {
-                return TestResult::discard();
-            }
-
-            let value = serde_json::json!({ "lat": lat, "lon": lon, "radius_km": radius_km });
-            let query: LightningQuery = serde_json::from_value(value).unwrap();
-
-            TestResult::from_bool(
-                query.lat == Some(lat)
-                    && query.lon == Some(lon)
-                    && query.radius_km == Some(radius_km)
-            )
-        }
-
-        fn prop_lightning_query_without_radius_defaults_to_none(location: String) -> bool {
-            let value = serde_json::json!({ "location": location });
-            let query: LightningQuery = serde_json::from_value(value).unwrap();
-
-            query.location == Some(location) && query.radius_km.is_none()
+            strikes_within(strikes.clone(), center, small).len()
+                <= strikes_within(strikes, center, large).len()
         }
     }
 
     #[test]
-    fn test_lightning_query_no_location() {
-        let json = r#"{}"#;
-        let query: LightningQuery = serde_json::from_str(json).unwrap();
+    fn keeps_only_strikes_inside_radius() {
+        let oslo = strike(10.7522, 59.9139);
+        let trondheim = strike(10.4034, 63.4308);
 
-        assert!(query.location.is_none());
-        assert_eq!(query.radius_km, None);
+        let kept = strikes_within(vec![oslo, trondheim], Point::new(10.75, 59.91), 50.0);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].location, Point::new(10.7522, 59.9139));
     }
 
-    #[test]
-    fn test_distance_calculation() {
-        // Create two points: Oslo and Trondheim (approximately 388km apart)
-        let oslo = Point::new(10.7522, 59.9139);
-        let trondheim = Point::new(10.4034, 63.4308);
+    #[tokio::test]
+    async fn filters_cached_lightning_by_coordinates() {
+        let state = test_state();
+        state
+            .lightning_cache
+            .insert((), vec![strike(10.7522, 59.9139), strike(10.4034, 63.4308)])
+            .await;
+        let app = create_test_app_with_state(state);
 
-        let distance = Haversine.distance(oslo, trondheim);
+        let (status, body) = make_request(
+            app,
+            "/api/recent_lightning?lat=59.91&lon=10.75&radius_km=25",
+        )
+        .await;
 
-        // Distance should be approximately 388km (388000 meters)
-        assert!((distance - 388000.0_f64).abs() < 10000.0); // Allow 10km tolerance
+        assert_eq!(status, StatusCode::OK);
+        let strikes: Vec<Lightning> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(strikes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_queries() {
+        for query in [
+            "/api/recent_lightning?radius_km=-1",
+            "/api/recent_lightning?lat=59.9",
+            "/api/recent_lightning?lat=abc&lon=10",
+        ] {
+            let (status, _) = make_request(create_test_app(), query).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        }
     }
 }

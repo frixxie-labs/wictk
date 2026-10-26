@@ -2,18 +2,20 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use geo::{Distance, Haversine, Point};
-use reqwest::StatusCode;
+use geo::Point;
 use serde::{Deserialize, Serialize};
-use tracing::{error, instrument};
+use tracing::instrument;
 use utoipa::{IntoParams, ToSchema};
-use wictk_core::{Coordinates, Earthquake};
+use wictk_core::Earthquake;
 
 use crate::AppState;
 
-use super::{error::ApplicationError, location::lookup_location};
+use super::{
+    cache::get_or_fetch,
+    error::ApplicationError,
+    location::{bad_request, resolve_location, within_radius_km, LocationInput, LocationParams},
+};
 
-const EARTHQUAKE_CACHE_KEY: &str = "recent_earthquakes";
 const DEFAULT_RADIUS_KM: f64 = 50.0;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 500;
@@ -25,9 +27,9 @@ pub struct EarthquakeQuery {
     /// Optional location name (e.g., "Oslo")
     pub location: Option<String>,
     /// Optional latitude coordinate
-    pub lat: Option<f64>,
+    pub lat: Option<String>,
     /// Optional longitude coordinate
-    pub lon: Option<f64>,
+    pub lon: Option<String>,
     /// Radius in kilometers; defaults to 50 when a location is provided (maximum: 20001.6)
     pub radius_km: Option<f64>,
     /// Minimum earthquake magnitude
@@ -36,14 +38,14 @@ pub struct EarthquakeQuery {
     pub limit: Option<usize>,
 }
 
-enum EarthquakeLocation {
-    City(String),
-    Coordinates(Coordinates),
+struct ValidatedEarthquakeQuery {
+    area: Option<(LocationInput, f64)>,
+    criteria: Criteria,
 }
 
-struct ValidatedEarthquakeQuery {
-    location: Option<EarthquakeLocation>,
-    radius_km: Option<f64>,
+/// Pure selection criteria applied to the feed.
+#[derive(Debug, Clone, PartialEq)]
+struct Criteria {
     min_magnitude: Option<f64>,
     limit: usize,
 }
@@ -52,44 +54,13 @@ impl TryFrom<EarthquakeQuery> for ValidatedEarthquakeQuery {
     type Error = ApplicationError;
 
     fn try_from(query: EarthquakeQuery) -> Result<Self, Self::Error> {
-        if query.location.is_some() && (query.lat.is_some() || query.lon.is_some()) {
-            return Err(bad_request(
-                "Provide either 'location' or 'lat' and 'lon', not both",
-            ));
+        let location = LocationParams {
+            location: query.location,
+            lat: query.lat,
+            lon: query.lon,
         }
+        .parse()?;
 
-        let location = match (query.location, query.lat, query.lon) {
-            (Some(location), None, None) => {
-                let location = location.trim();
-                if location.is_empty() {
-                    return Err(bad_request("'location' must not be empty"));
-                }
-                Some(EarthquakeLocation::City(location.to_string()))
-            }
-            (None, Some(lat), Some(lon)) => {
-                if !lat.is_finite()
-                    || !lon.is_finite()
-                    || !(-90.0..=90.0).contains(&lat)
-                    || !(-180.0..=180.0).contains(&lon)
-                {
-                    return Err(bad_request("Latitude or longitude is out of range"));
-                }
-                Some(EarthquakeLocation::Coordinates(Coordinates::new(
-                    lon as f32, lat as f32,
-                )))
-            }
-            (None, None, None) => None,
-            (None, _, _) => {
-                return Err(bad_request("Provide both 'lat' and 'lon'"));
-            }
-            (Some(_), _, _) => unreachable!("mixed location inputs were rejected above"),
-        };
-
-        if location.is_none() && query.radius_km.is_some() {
-            return Err(bad_request(
-                "'radius_km' requires 'location' or 'lat' and 'lon'",
-            ));
-        }
         if query
             .radius_km
             .is_some_and(|radius| !radius.is_finite() || radius <= 0.0 || radius > MAX_RADIUS_KM)
@@ -98,33 +69,66 @@ impl TryFrom<EarthquakeQuery> for ValidatedEarthquakeQuery {
                 "'radius_km' must be greater than 0 and no more than 20001.6",
             ));
         }
+        let area = match (location, query.radius_km) {
+            (Some(location), radius_km) => Some((location, radius_km.unwrap_or(DEFAULT_RADIUS_KM))),
+            (None, Some(_)) => {
+                return Err(bad_request(
+                    "'radius_km' requires 'location' or 'lat' and 'lon'",
+                ))
+            }
+            (None, None) => None,
+        };
+
         if query
             .min_magnitude
             .is_some_and(|magnitude| !magnitude.is_finite())
         {
             return Err(bad_request("'min_magnitude' must be a finite number"));
         }
-
         let limit = query.limit.unwrap_or(DEFAULT_LIMIT);
         if !(1..=MAX_LIMIT).contains(&limit) {
             return Err(bad_request("'limit' must be between 1 and 500"));
         }
 
-        let radius_km = location
-            .as_ref()
-            .map(|_| query.radius_km.unwrap_or(DEFAULT_RADIUS_KM));
-
         Ok(Self {
-            location,
-            radius_km,
-            min_magnitude: query.min_magnitude,
-            limit,
+            area,
+            criteria: Criteria {
+                min_magnitude: query.min_magnitude,
+                limit,
+            },
         })
     }
 }
 
-fn bad_request(message: &str) -> ApplicationError {
-    ApplicationError::new(message, StatusCode::BAD_REQUEST)
+/// Filters by magnitude and area, orders newest first and applies the limit.
+fn select_earthquakes(
+    earthquakes: Vec<Earthquake>,
+    criteria: &Criteria,
+    area: Option<(Point, f64)>,
+) -> Vec<Earthquake> {
+    let mut selected: Vec<Earthquake> = earthquakes
+        .into_iter()
+        .filter(|earthquake| {
+            criteria.min_magnitude.is_none_or(|minimum| {
+                earthquake
+                    .magnitude
+                    .is_some_and(|magnitude| magnitude >= minimum)
+            })
+        })
+        .filter(|earthquake| {
+            area.is_none_or(|(center, radius_km)| {
+                within_radius_km(center, earthquake.coordinates.into(), radius_km)
+            })
+        })
+        .collect();
+    selected.sort_by(|left, right| {
+        right
+            .time
+            .cmp(&left.time)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    selected.truncate(criteria.limit);
+    selected
 }
 
 #[utoipa::path(
@@ -135,8 +139,7 @@ fn bad_request(message: &str) -> ApplicationError {
         (status = 200, description = "Recent earthquakes, newest first", body = Vec<Earthquake>),
         (status = 400, description = "Invalid query parameters", body = String),
         (status = 404, description = "Location not found", body = String),
-        (status = 500, description = "Geocoding provider failure", body = String),
-        (status = 502, description = "USGS earthquake feed unavailable", body = String)
+        (status = 502, description = "USGS feed or geocoding provider unavailable", body = String)
     ),
     tag = "earthquakes"
 )]
@@ -147,65 +150,23 @@ pub async fn get_earthquakes(
 ) -> Result<Json<Vec<Earthquake>>, ApplicationError> {
     let query = ValidatedEarthquakeQuery::try_from(query)?;
 
-    let center = match query.location {
-        Some(EarthquakeLocation::City(location)) => Some(
-            lookup_location(
-                &app_state.client,
-                &location,
-                &app_state.location_cache,
-                &app_state.openweathermap_apikey,
-            )
-            .await?
-            .location,
-        ),
-        Some(EarthquakeLocation::Coordinates(coordinates)) => Some(coordinates),
+    let area = match query.area {
+        Some((location, radius_km)) => Some((
+            Point::from(resolve_location(&app_state, location).await?),
+            radius_km,
+        )),
         None => None,
     };
 
-    let mut earthquakes = app_state
-        .earthquake_cache
-        .try_get_with(
-            EARTHQUAKE_CACHE_KEY.to_string(),
-            Earthquake::fetch_feed(&app_state.client, &app_state.earthquake_feed_url),
-        )
-        .await
-        .map_err(|err| {
-            error!(error = ?err, "Failed to fetch USGS earthquake feed");
-            ApplicationError::new(
-                "Failed to fetch USGS earthquake feed",
-                StatusCode::BAD_GATEWAY,
-            )
-        })?;
+    let earthquakes = get_or_fetch(
+        &app_state.earthquake_cache,
+        (),
+        Earthquake::fetch_feed(&app_state.client, &app_state.provider_urls.earthquakes),
+        "USGS earthquake feed",
+    )
+    .await?;
 
-    earthquakes.retain(|earthquake| {
-        if query
-            .min_magnitude
-            .is_some_and(|minimum| earthquake.magnitude.is_none_or(|value| value < minimum))
-        {
-            return false;
-        }
-
-        match (&center, query.radius_km) {
-            (Some(center), Some(radius_km)) => {
-                let center = Point::new(center.lon as f64, center.lat as f64);
-                let event = Point::new(
-                    earthquake.coordinates.lon as f64,
-                    earthquake.coordinates.lat as f64,
-                );
-                Haversine.distance(center, event) <= radius_km * 1000.0
-            }
-            _ => true,
-        }
-    });
-    earthquakes.sort_by(|left, right| {
-        right
-            .time
-            .cmp(&left.time)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    earthquakes.truncate(query.limit);
-
-    Ok(Json(earthquakes))
+    Ok(Json(select_earthquakes(earthquakes, &query.criteria, area)))
 }
 
 #[cfg(test)]
@@ -215,11 +176,11 @@ mod tests {
         setup_router,
         test_utils::{create_test_app_with_state, get_metrics_handle, make_request},
     };
+    use axum::http::StatusCode;
     use chrono::{DateTime, Utc};
+    use quickcheck::quickcheck;
     use serde_json::json;
-    use wictk_core::{
-        EarthquakeAlertLevel, EarthquakeStatus, OpenWeatherMapLocation, USGS_ALL_DAY_FEED_URL,
-    };
+    use wictk_core::{Coordinates, EarthquakeAlertLevel, EarthquakeStatus, OpenWeatherMapLocation};
 
     fn earthquake(id: &str, magnitude: Option<f64>, time: i64, lon: f32, lat: f32) -> Earthquake {
         Earthquake {
@@ -228,7 +189,7 @@ mod tests {
             place: Some(format!("Place {id}")),
             time: DateTime::<Utc>::from_timestamp(time, 0).unwrap(),
             updated: DateTime::<Utc>::from_timestamp(time + 30, 0).unwrap(),
-            coordinates: Coordinates::new(lon, lat),
+            coordinates: Coordinates::new(lon, lat).unwrap(),
             depth_km: 8.0,
             significance: Some(100),
             alert_level: Some(EarthquakeAlertLevel::Green),
@@ -239,19 +200,44 @@ mod tests {
     }
 
     fn test_state(feed_url: &str) -> AppState {
-        AppState::new(
-            reqwest::Client::new(),
-            "test_api_key".to_string(),
-            feed_url.to_string(),
-        )
+        let mut state = crate::handlers::test_utils::test_state();
+        state.provider_urls.earthquakes = feed_url.to_string();
+        state
+    }
+
+    quickcheck! {
+        fn prop_selection_is_sorted_limited_and_meets_minimum(
+            events: Vec<(Option<u8>, u32)>,
+            min_magnitude: Option<u8>,
+            limit: u8
+        ) -> bool {
+            let earthquakes: Vec<Earthquake> = events
+                .iter()
+                .enumerate()
+                .map(|(i, (magnitude, time))| {
+                    earthquake(&i.to_string(), magnitude.map(f64::from), *time as i64, 10.0, 60.0)
+                })
+                .collect();
+            let criteria = Criteria {
+                min_magnitude: min_magnitude.map(f64::from),
+                limit: limit as usize + 1,
+            };
+
+            let selected = select_earthquakes(earthquakes, &criteria, None);
+
+            selected.len() <= criteria.limit
+                && selected.windows(2).all(|pair| pair[0].time >= pair[1].time)
+                && selected.iter().all(|earthquake| {
+                    criteria
+                        .min_magnitude
+                        .is_none_or(|minimum| earthquake.magnitude.is_some_and(|m| m >= minimum))
+                })
+        }
     }
 
     async fn app_with_earthquakes(earthquakes: Vec<Earthquake>) -> axum::Router {
-        let state = test_state(USGS_ALL_DAY_FEED_URL);
-        state
-            .earthquake_cache
-            .insert(EARTHQUAKE_CACHE_KEY.to_string(), earthquakes)
-            .await;
+        let state = crate::handlers::test_utils::test_state();
+        state.earthquake_cache.insert((), earthquakes).await;
         create_test_app_with_state(state)
     }
 
@@ -291,11 +277,11 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_cached_city_for_radius_filter() {
-        let state = test_state(USGS_ALL_DAY_FEED_URL);
+        let state = crate::handlers::test_utils::test_state();
         state
             .earthquake_cache
             .insert(
-                EARTHQUAKE_CACHE_KEY.to_string(),
+                (),
                 vec![
                     earthquake("oslo", Some(2.0), 200, 10.7522, 59.9139),
                     earthquake("trondheim", Some(2.0), 100, 10.4034, 63.4308),
@@ -305,11 +291,11 @@ mod tests {
         state
             .location_cache
             .insert(
-                "Oslo".to_string(),
+                "oslo".to_string(),
                 OpenWeatherMapLocation {
                     name: "Oslo".to_string(),
                     local_names: None,
-                    location: Coordinates::new(10.7522, 59.9139),
+                    location: Coordinates::new(10.7522, 59.9139).unwrap(),
                     country: "NO".to_string(),
                     state: None,
                 },

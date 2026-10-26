@@ -1,4 +1,4 @@
-use crate::{handlers::setup_router, AppState};
+use crate::{handlers::setup_router, AppState, ProviderUrls};
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -8,7 +8,6 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
 use tower::ServiceExt;
-use wictk_core::USGS_ALL_DAY_FEED_URL;
 
 static METRICS_HANDLE: Lazy<Mutex<Option<PrometheusHandle>>> = Lazy::new(|| Mutex::new(None));
 
@@ -23,14 +22,25 @@ pub fn get_metrics_handle() -> PrometheusHandle {
     handle.as_ref().unwrap().clone()
 }
 
-pub fn create_test_app() -> axum::Router {
-    let client = reqwest::Client::new();
-    let app_state = AppState::new(
-        client,
+/// State whose providers point at an unroutable address, so tests never reach real APIs.
+pub fn test_state() -> AppState {
+    let unreachable = "http://127.0.0.1:9".to_string();
+    AppState::new(
+        reqwest::Client::new(),
         "test_api_key".to_string(),
-        USGS_ALL_DAY_FEED_URL.to_string(),
-    );
-    create_test_app_with_state(app_state)
+        ProviderUrls {
+            met_alerts: unreachable.clone(),
+            met_nowcast: unreachable.clone(),
+            openweathermap_nowcast: unreachable.clone(),
+            openweathermap_geocoding: unreachable.clone(),
+            lightning: unreachable.clone(),
+            earthquakes: unreachable,
+        },
+    )
+}
+
+pub fn create_test_app() -> axum::Router {
+    create_test_app_with_state(test_state())
 }
 
 pub fn create_test_app_with_state(app_state: AppState) -> axum::Router {
