@@ -1,53 +1,83 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use reqwest::{Client, Url};
 
-use crate::device::DeviceId;
-use crate::sensor::SensorIds;
+use crate::api::post_json;
+use crate::measurement::NewMeasurement;
 
-pub mod storage_client;
+/// Writes measurement batches to hemrs.
+pub struct StorageClient {
+    client: Client,
+    url: Url,
+}
 
-pub use storage_client::StorageClient;
+impl StorageClient {
+    pub fn new(client: Client, url: Url) -> Self {
+        Self { client, url }
+    }
 
-pub trait StorageApi {
-    async fn store_met_nowcast(
-        &self,
-        url: &str,
-        met_nowcast: &wictk_core::MetNowcast,
-        device_id: &DeviceId,
-        sensor_ids: &SensorIds,
-    ) -> Result<()>;
+    pub async fn store(&self, measurements: &[NewMeasurement]) -> Result<()> {
+        if measurements.is_empty() {
+            return Ok(());
+        }
+        post_json(&self.client, self.url.clone(), measurements).await
+    }
+}
 
-    async fn store_openweather_nowcast(
-        &self,
-        url: &str,
-        open_weather_nowcast: &wictk_core::OpenWeatherNowcast,
-        device_id: &DeviceId,
-        sensor_ids: &SensorIds,
-    ) -> Result<()>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::DeviceId;
+    use crate::sensor::SensorId;
+    use chrono::Utc;
 
-    async fn store_lightnings(
-        &self,
-        url: &str,
-        device_id: &DeviceId,
-        lon_id: i32,
-        lat_id: i32,
-        lightnings: &[wictk_core::Lightning],
-    ) -> Result<()>;
+    fn measurement() -> NewMeasurement {
+        NewMeasurement {
+            timestamp: Utc::now(),
+            device: DeviceId(1),
+            sensor: SensorId(2),
+            measurement: 3.0,
+        }
+    }
 
-    async fn store_alert_count(
-        &self,
-        url: &str,
-        timestamp: DateTime<Utc>,
-        device_id: &DeviceId,
-        alert_count_sensor_id: i32,
-        alert_count: usize,
-    ) -> Result<()>;
+    #[tokio::test]
+    async fn posts_measurements() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"[{"device": 1, "sensor": 2, "measurement": 3.0}]"#.to_string(),
+            ))
+            .with_status(201)
+            .create_async()
+            .await;
+        let storage = StorageClient::new(Client::new(), server.url().parse().unwrap());
 
-    async fn store_earthquakes(
-        &self,
-        url: &str,
-        device_id: &DeviceId,
-        sensor_ids: &SensorIds,
-        earthquakes: &[wictk_core::Earthquake],
-    ) -> Result<()>;
+        storage.store(&[measurement()]).await.unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn skips_empty_batches() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("POST", "/").expect(0).create_async().await;
+        let storage = StorageClient::new(Client::new(), server.url().parse().unwrap());
+
+        storage.store(&[]).await.unwrap();
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reports_rejected_batches() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
+        let storage = StorageClient::new(Client::new(), server.url().parse().unwrap());
+
+        assert!(storage.store(&[measurement()]).await.is_err());
+    }
 }

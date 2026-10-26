@@ -1,334 +1,260 @@
-use anyhow::Result;
-use clap::Parser;
-use device::{DeviceApi, DeviceClient};
-use sensor::{SensorApi, SensorClient, SensorIds};
-use storage::{StorageApi, StorageClient};
-use weather::{WeatherApi, WeatherClient};
-use wictk_core::{Lightning, Nowcast};
+use std::time::Instant;
 
+use anyhow::Result;
+use chrono::{DateTime, TimeDelta, Utc};
+use clap::Parser;
+use device::{DeviceId, DeviceRegistry, NewDevice};
+use registry::Registry;
+use sensor::{SensorIds, SensorRegistry};
+use storage::StorageClient;
+use weather::WeatherClient;
+use wictk_core::{Coordinates, Earthquake, Lightning, Nowcast};
+
+mod api;
 mod cli;
 mod device;
 mod measurement;
+mod registry;
 mod sensor;
 mod storage;
 mod weather;
 
-fn retain_recent_earthquakes(
-    earthquakes: &mut Vec<wictk_core::Earthquake>,
-    now: chrono::DateTime<chrono::Utc>,
-) {
-    let cutoff = now - chrono::Duration::minutes(10);
-    earthquakes.retain(|earthquake| earthquake.time >= cutoff && earthquake.time <= now);
+const EARTHQUAKE_REGION: &str = "Japan";
+const EARTHQUAKE_REGION_CENTER: (f32, f32) = (138.2529, 36.2048);
+const EARTHQUAKE_REGION_RADIUS_KM: f64 = 2000.0;
+
+fn recent_window() -> TimeDelta {
+    TimeDelta::minutes(10)
+}
+
+/// Earthquakes from the last ten minutes, inclusive, excluding future timestamps.
+fn recent_earthquakes(earthquakes: Vec<Earthquake>, now: DateTime<Utc>) -> Vec<Earthquake> {
+    let cutoff = now - recent_window();
+    earthquakes
+        .into_iter()
+        .filter(|earthquake| (cutoff..=now).contains(&earthquake.time))
+        .collect()
+}
+
+/// Lightning younger than ten minutes.
+fn recent_lightnings(lightnings: Vec<Lightning>, now: DateTime<Utc>) -> Vec<Lightning> {
+    let cutoff = now - recent_window();
+    lightnings
+        .into_iter()
+        .filter(|lightning| lightning.time > cutoff)
+        .collect()
+}
+
+struct NowcastMeasurements {
+    measurements: Vec<measurement::NewMeasurement>,
+    met_count: usize,
+    openweather_count: usize,
+}
+
+fn nowcast_measurements(
+    nowcasts: &[Nowcast],
+    met_device: DeviceId,
+    openweather_device: DeviceId,
+    sensors: &SensorIds,
+) -> NowcastMeasurements {
+    nowcasts.iter().fold(
+        NowcastMeasurements {
+            measurements: Vec::new(),
+            met_count: 0,
+            openweather_count: 0,
+        },
+        |mut acc, nowcast| {
+            match nowcast {
+                Nowcast::Met(met) => {
+                    acc.met_count += 1;
+                    acc.measurements
+                        .extend(measurement::met_nowcast(met, met_device, sensors));
+                }
+                Nowcast::OpenWeather(openweather) => {
+                    acc.openweather_count += 1;
+                    acc.measurements.extend(measurement::openweather_nowcast(
+                        openweather,
+                        openweather_device,
+                        sensors,
+                    ));
+                }
+            }
+            acc
+        },
+    )
+}
+
+struct Logger {
+    weather: WeatherClient,
+    storage: StorageClient,
+    devices: DeviceRegistry,
+    sensors: SensorIds,
+}
+
+impl Logger {
+    async fn log_alert_count(&self, device: DeviceId) -> Result<()> {
+        let alerts = self.weather.get_alerts().await?;
+        tracing::info!("Backend returned {} weather alerts", alerts.len());
+        self.storage
+            .store(&measurement::alert_count(
+                Utc::now(),
+                alerts.len(),
+                device,
+                &self.sensors,
+            ))
+            .await
+    }
+
+    async fn log_earthquakes(&self, device: DeviceId) -> Result<()> {
+        let (lon, lat) = EARTHQUAKE_REGION_CENTER;
+        let earthquakes = self
+            .weather
+            .get_earthquakes(Coordinates::new(lon, lat)?, EARTHQUAKE_REGION_RADIUS_KM)
+            .await?;
+        let earthquakes = recent_earthquakes(earthquakes, Utc::now());
+        if earthquakes.is_empty() {
+            tracing::info!("No earthquakes found near {EARTHQUAKE_REGION} in the last 10 minutes");
+            return Ok(());
+        }
+        tracing::warn!(
+            earthquake_count = earthquakes.len(),
+            earthquakes = ?earthquakes,
+            "Earthquakes found near {EARTHQUAKE_REGION} in the last 10 minutes"
+        );
+        self.storage
+            .store(&measurement::earthquakes(
+                &earthquakes,
+                device,
+                &self.sensors,
+            ))
+            .await
+    }
+
+    async fn log_location(&mut self, location: &str) -> Result<()> {
+        let start = Instant::now();
+        let nowcasts = self.weather.get_nowcasts(location).await?;
+        tracing::info!(
+            "Retrieved {} nowcasts for {} in {:.2}s",
+            nowcasts.len(),
+            location,
+            start.elapsed().as_secs_f64()
+        );
+        if nowcasts.is_empty() {
+            tracing::warn!("No nowcast data available for location: {}", location);
+            return Ok(());
+        }
+
+        let met_device = self
+            .devices
+            .ensure(&NewDevice::new("wictk_met", location))
+            .await?;
+        let openweather_device = self
+            .devices
+            .ensure(&NewDevice::new("wictk_opm", location))
+            .await?;
+
+        let batch = nowcast_measurements(&nowcasts, met_device, openweather_device, &self.sensors);
+        let start = Instant::now();
+        self.storage.store(&batch.measurements).await?;
+        tracing::info!(
+            "Stored {} nowcasts for {} ({} MET, {} OpenWeatherMap) in {:.2}s",
+            nowcasts.len(),
+            location,
+            batch.met_count,
+            batch.openweather_count,
+            start.elapsed().as_secs_f64()
+        );
+        Ok(())
+    }
+
+    async fn log_lightning(&self, device: DeviceId) -> Result<()> {
+        let lightnings = self.weather.get_lightnings().await?;
+        let total = lightnings.len();
+        let recent = recent_lightnings(lightnings, Utc::now());
+        tracing::info!(
+            "Filtered {} recent lightnings from {} total (within 10 minutes)",
+            recent.len(),
+            total
+        );
+        self.storage
+            .store(&measurement::lightnings(&recent, device, &self.sensors))
+            .await?;
+        tracing::info!("Stored {} lightning records", recent.len());
+        Ok(())
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = cli::Opts::parse();
-    cli::init_tracing(&opts);
-
+    cli::init_tracing(&opts)?;
     tracing::info!("Starting client logger with configuration: {:?}", opts);
 
     let client = reqwest::Client::new();
-    tracing::info!("HTTP client initialized successfully");
-
-    let mut device_client = DeviceClient::new(client.clone());
-    let mut sensor_client = SensorClient::new(client.clone());
-    let storage_client = StorageClient::new(client.clone());
-    let weather_client = WeatherClient::new(client.clone());
-
-    // Setup sensors (global, not per location)
-    let setup_start = std::time::Instant::now();
-    let sensor_url = format!("{}api/sensors", opts.hemrs_url);
-    let sensors: SensorIds = sensor_client.setup_sensors(&sensor_url).await?;
-
-    // Setup global devices
-    let device_url = format!("{}api/devices", opts.hemrs_url);
-    let device_lightning: device::DeviceId = device_client
-        .setup_device(&device_url, "wictk_lightning", "Mobile")
+    let setup_start = Instant::now();
+    let sensors = SensorRegistry::new(
+        client.clone(),
+        api::endpoint(&opts.hemrs_url, "api/sensors")?,
+    )
+    .setup_sensors()
+    .await?;
+    let mut devices: DeviceRegistry = Registry::new(
+        client.clone(),
+        api::endpoint(&opts.hemrs_url, "api/devices")?,
+    );
+    let lightning_device = devices
+        .ensure(&NewDevice::new("wictk_lightning", "Mobile"))
         .await?;
-    let device_alerts: device::DeviceId = device_client
-        .setup_device(&device_url, "wictk_alerts", "Global")
+    let alerts_device = devices
+        .ensure(&NewDevice::new("wictk_alerts", "Global"))
         .await?;
-    let device_earthquakes: device::DeviceId = device_client
-        .setup_device(&device_url, "wictk_earthquake", "Japan")
+    let earthquake_device = devices
+        .ensure(&NewDevice::new("wictk_earthquake", EARTHQUAKE_REGION))
         .await?;
-
-    let setup_elapsed = setup_start.elapsed();
     tracing::info!(
         "Global setup completed in {:.2}s",
-        setup_elapsed.as_secs_f64()
+        setup_start.elapsed().as_secs_f64()
     );
 
-    match weather_client.get_alerts(&opts.service_url).await {
-        Ok(alerts) => {
-            tracing::info!("Backend returned {} weather alerts", alerts.len());
-            let storage_url = format!("{}api/measurements", opts.hemrs_url);
-            if let Err(e) = storage_client
-                .store_alert_count(
-                    &storage_url,
-                    chrono::Utc::now(),
-                    &device_alerts,
-                    sensors.alert_count,
-                    alerts.len(),
-                )
-                .await
-            {
-                tracing::warn!("Failed to store weather alert count: {}", e);
-            }
-        }
-        Err(e) => tracing::warn!("Failed to fetch weather alerts from backend: {}", e),
-    }
+    let mut logger = Logger {
+        weather: WeatherClient::new(client.clone(), opts.service_url.clone()),
+        storage: StorageClient::new(client, api::endpoint(&opts.hemrs_url, "api/measurements")?),
+        devices,
+        sensors,
+    };
 
-    match weather_client
-        .get_earthquakes(&opts.service_url, 36.2048, 138.2529, 2000.0)
-        .await
-    {
-        Ok(mut earthquakes) => {
-            retain_recent_earthquakes(&mut earthquakes, chrono::Utc::now());
-            if earthquakes.is_empty() {
-                tracing::info!("No earthquakes found near Japan in the last 10 minutes");
-            } else {
-                tracing::warn!(
-                    earthquake_count = earthquakes.len(),
-                    earthquakes = ?earthquakes,
-                    "Earthquakes found near Japan in the last 10 minutes"
-                );
-                let storage_url = format!("{}api/measurements", opts.hemrs_url);
-                if let Err(e) = storage_client
-                    .store_earthquakes(&storage_url, &device_earthquakes, &sensors, &earthquakes)
-                    .await
-                {
-                    tracing::warn!("Failed to store earthquakes near Japan: {}", e);
-                }
-            }
-        }
-        Err(e) => tracing::warn!("Failed to check for earthquakes near Japan: {}", e),
+    if let Err(err) = logger.log_alert_count(alerts_device).await {
+        tracing::warn!(error = ?err, "Failed to log weather alert count");
     }
-
-    // Process each location
+    if let Err(err) = logger.log_earthquakes(earthquake_device).await {
+        tracing::warn!(error = ?err, "Failed to log earthquakes near {EARTHQUAKE_REGION}");
+    }
     for location in &opts.locations {
-        tracing::info!("Processing location: {}", location);
-
-        // Fetch nowcast data for this location
-        let start_time = std::time::Instant::now();
-        let nowcasts = match weather_client
-            .get_nowcast(&opts.service_url, location)
-            .await
-        {
-            Ok(data) => {
-                let elapsed = start_time.elapsed();
-                tracing::info!(
-                    "Successfully retrieved nowcast data for {} in {:.2}s",
-                    location,
-                    elapsed.as_secs_f64()
-                );
-                data
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch nowcast data for {}: {}", location, e);
-                continue; // Continue with other locations
-            }
-        };
-
-        if nowcasts.is_empty() {
-            tracing::warn!("No nowcast data available for location: {}", location);
-            continue;
+        if let Err(err) = logger.log_location(location).await {
+            tracing::error!(error = ?err, "Failed to log nowcasts for {location}");
         }
-
-        // Setup devices for this location
-        let device_met: device::DeviceId = match device_client
-            .setup_device(&device_url, "wictk_met", location)
-            .await
-        {
-            Ok(device_id) => {
-                tracing::info!(
-                    "MET device setup completed for {} (ID: {})",
-                    location,
-                    device_id
-                );
-                device_id
-            }
-            Err(e) => {
-                tracing::error!("Failed to setup MET device for {}: {}", location, e);
-                continue;
-            }
-        };
-
-        let device_opm: device::DeviceId = match device_client
-            .setup_device(&device_url, "wictk_opm", location)
-            .await
-        {
-            Ok(device_id) => {
-                tracing::info!(
-                    "OpenWeatherMap device setup completed for {} (ID: {})",
-                    location,
-                    device_id
-                );
-                device_id
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to setup OpenWeatherMap device for {}: {}",
-                    location,
-                    e
-                );
-                continue;
-            }
-        };
-
-        // Log the first nowcast for debugging
-        if let Some(first_nowcast) = nowcasts.first() {
-            tracing::info!("First nowcast for {}: {}", location, first_nowcast);
-        }
-
-        let storage_url = format!("{}api/measurements", opts.hemrs_url);
-        let storage_start = std::time::Instant::now();
-        let mut met_count = 0;
-        let mut opm_count = 0;
-
-        for (index, nowcast) in nowcasts.iter().enumerate() {
-            tracing::debug!(
-                "Processing nowcast {} of {} for {}",
-                index + 1,
-                nowcasts.len(),
-                location
-            );
-
-            let result: Result<()> = match nowcast.clone() {
-                Nowcast::Met(met_nowcast) => {
-                    met_count += 1;
-                    tracing::debug!("Storing MET nowcast data for {}", location);
-                    storage_client
-                        .store_met_nowcast(&storage_url, &met_nowcast, &device_met, &sensors)
-                        .await
-                }
-                Nowcast::OpenWeather(openweather_nowcast) => {
-                    opm_count += 1;
-                    tracing::debug!("Storing OpenWeatherMap nowcast data for {}", location);
-                    storage_client
-                        .store_openweather_nowcast(
-                            &storage_url,
-                            &openweather_nowcast,
-                            &device_opm,
-                            &sensors,
-                        )
-                        .await
-                }
-            };
-
-            match result {
-                Ok(()) => {
-                    tracing::debug!("Successfully stored nowcast {} for {}", index + 1, location)
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to store nowcast {} for {}: {}",
-                        index + 1,
-                        location,
-                        e
-                    );
-                    continue;
-                }
-            }
-        }
-
-        let storage_elapsed = storage_start.elapsed();
-        tracing::info!(
-            "Stored {} nowcasts for {} ({} MET, {} OpenWeatherMap) in {:.2}s",
-            nowcasts.len(),
-            location,
-            met_count,
-            opm_count,
-            storage_elapsed.as_secs_f64()
-        );
     }
 
-    // Handle lightning data if requested
     if !opts.store_lightning {
         tracing::info!("Lightning storage disabled - skipping lightning data");
         return Ok(());
     }
-
-    let now = chrono::Utc::now();
-    tracing::info!("Current time for lightning filtering: {}", now);
-
-    let lightnings = match weather_client.get_lightnings(&opts.service_url).await {
-        Ok(data) => {
-            tracing::info!("Successfully retrieved lightning data");
-            data
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch lightning data: {}", e);
-            return Err(e);
-        }
-    };
-
-    if lightnings.is_empty() {
-        tracing::info!("No lightning data available");
-        return Ok(());
-    }
-
-    let recent_lightnings: Vec<&Lightning> = lightnings
-        .iter()
-        .filter(|lightning| {
-            // Filter out lightnings that are too old (older than 10 minutes)
-            let lightning_time = lightning.time.with_timezone(&chrono::Utc);
-            let age_minutes = now.signed_duration_since(lightning_time).num_minutes();
-            let is_recent = age_minutes < 10;
-
-            if !is_recent {
-                tracing::debug!("Filtering out old lightning: {} minutes old", age_minutes);
-            }
-
-            is_recent
-        })
-        .collect();
-
-    tracing::info!(
-        "Filtered {} recent lightnings from {} total (within 10 minutes)",
-        recent_lightnings.len(),
-        lightnings.len()
-    );
-
-    if recent_lightnings.is_empty() {
-        tracing::info!("No recent lightning data to store");
-        return Ok(());
-    }
-
-    tracing::info!(
-        "Storing {} recent lightning records",
-        recent_lightnings.len()
-    );
-
-    let storage_url = format!("{}api/measurements", opts.hemrs_url);
-    let recent_lightnings: Vec<Lightning> = recent_lightnings.into_iter().cloned().collect();
-    match storage_client
-        .store_lightnings(
-            &storage_url,
-            &device_lightning,
-            sensors.lon,
-            sensors.lat,
-            &recent_lightnings,
-        )
-        .await
-    {
-        Ok(()) => {
-            tracing::info!("Stored {} lightning records", recent_lightnings.len());
-        }
-        Err(e) => {
-            tracing::error!("Failed to store lightning batch: {}", e);
-        }
-    }
-
-    Ok(())
+    logger.log_lightning(lightning_device).await
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Duration, Utc};
-    use wictk_core::{Coordinates, Earthquake, EarthquakeStatus};
+    use super::*;
+    use chrono::Duration;
+    use geo::Point;
+    use quickcheck::quickcheck;
+    use wictk_core::EarthquakeStatus;
 
-    use super::retain_recent_earthquakes;
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
 
     fn earthquake(id: &str, time: DateTime<Utc>) -> Earthquake {
         Earthquake {
@@ -337,7 +263,7 @@ mod tests {
             place: None,
             time,
             updated: time,
-            coordinates: Coordinates::new(138.2529, 36.2048),
+            coordinates: Coordinates::new(138.2529, 36.2048).unwrap(),
             depth_km: 1.0,
             significance: None,
             alert_level: None,
@@ -349,22 +275,60 @@ mod tests {
 
     #[test]
     fn retains_only_earthquakes_from_the_last_ten_minutes() {
-        let now = DateTime::parse_from_rfc3339("2026-08-11T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut earthquakes = vec![
+        let now = now();
+        let earthquakes = vec![
             earthquake("old", now - Duration::minutes(10) - Duration::seconds(1)),
             earthquake("boundary", now - Duration::minutes(10)),
             earthquake("recent", now - Duration::minutes(1)),
             earthquake("future", now + Duration::seconds(1)),
         ];
 
-        retain_recent_earthquakes(&mut earthquakes, now);
+        let recent = recent_earthquakes(earthquakes, now);
 
-        let ids: Vec<&str> = earthquakes
-            .iter()
-            .map(|earthquake| earthquake.id.as_str())
-            .collect();
+        let ids: Vec<&str> = recent.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["boundary", "recent"]);
+    }
+
+    quickcheck! {
+        fn prop_recent_lightnings_are_younger_than_ten_minutes(offsets: Vec<i32>) -> bool {
+            let now = now();
+            let strikes: Vec<Lightning> = offsets
+                .iter()
+                .map(|offset| Lightning::new(Point::new(0.0, 0.0), now - Duration::seconds(*offset as i64 % 3600), 1))
+                .collect();
+            let total = strikes.len();
+
+            let recent = recent_lightnings(strikes, now);
+
+            recent.iter().all(|strike| now - strike.time < recent_window())
+                && recent.len()
+                    == offsets.iter().filter(|o| ((**o as i64) % 3600) < 600).count()
+                && recent.len() <= total
+        }
+    }
+
+    #[test]
+    fn counts_nowcasts_per_provider_and_builds_their_measurements() {
+        let met: Nowcast = serde_json::from_value(serde_json::json!({ "met": {
+            "time": "2023-08-14T18:16:07Z",
+            "location": { "lon": 10.4, "lat": 63.4 },
+            "description": "cloudy",
+            "air_temperature": 17.7,
+            "relative_humidity": 80.5,
+            "precipitation_rate": 0.0,
+            "precipitation_amount": 0.0,
+            "wind_speed": 2.7,
+            "wind_speed_gust": 6.1,
+            "wind_from_direction": 294.4
+        }}))
+        .unwrap();
+        let sensors = SensorIds::from_fn(|kind| sensor::SensorId(kind as i32));
+
+        let batch = nowcast_measurements(&[met.clone(), met], DeviceId(1), DeviceId(2), &sensors);
+
+        assert_eq!(batch.met_count, 2);
+        assert_eq!(batch.openweather_count, 0);
+        assert_eq!(batch.measurements.len(), 14);
+        assert!(batch.measurements.iter().all(|m| m.device == DeviceId(1)));
     }
 }
