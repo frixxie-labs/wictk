@@ -21,17 +21,11 @@ pub enum SensorKind {
     Pressure,
     Clouds,
     Visibility,
-    Lon,
-    Lat,
     AlertCount,
-    EarthquakeDepth,
-    EarthquakeMagnitude,
-    EarthquakeSignificance,
-    EarthquakeTsunami,
 }
 
 impl SensorKind {
-    pub const ALL: [SensorKind; 18] = [
+    pub const ALL: [SensorKind; 12] = [
         SensorKind::Temperature,
         SensorKind::Humidity,
         SensorKind::WindSpeed,
@@ -43,13 +37,7 @@ impl SensorKind {
         SensorKind::Pressure,
         SensorKind::Clouds,
         SensorKind::Visibility,
-        SensorKind::Lon,
-        SensorKind::Lat,
         SensorKind::AlertCount,
-        SensorKind::EarthquakeDepth,
-        SensorKind::EarthquakeMagnitude,
-        SensorKind::EarthquakeSignificance,
-        SensorKind::EarthquakeTsunami,
     ];
 
     pub fn name(self) -> &'static str {
@@ -65,13 +53,7 @@ impl SensorKind {
             SensorKind::Pressure => "pressure",
             SensorKind::Clouds => "clouds",
             SensorKind::Visibility => "visibility",
-            SensorKind::Lon => "lon",
-            SensorKind::Lat => "lat",
             SensorKind::AlertCount => "alert_count",
-            SensorKind::EarthquakeDepth => "earthquake_depth",
-            SensorKind::EarthquakeMagnitude => "earthquake_magnitude",
-            SensorKind::EarthquakeSignificance => "earthquake_significance",
-            SensorKind::EarthquakeTsunami => "earthquake_tsunami",
         }
     }
 
@@ -80,16 +62,12 @@ impl SensorKind {
             SensorKind::Temperature | SensorKind::FeelsLike => "°C",
             SensorKind::Humidity | SensorKind::Clouds => "%",
             SensorKind::WindSpeed | SensorKind::WindSpeedGust => "m/s",
-            SensorKind::WindDeg | SensorKind::Lon | SensorKind::Lat => "°",
+            SensorKind::WindDeg => "°",
             SensorKind::PrecipitationRate => "mm/h",
             SensorKind::PrecipitationAmount => "mm",
             SensorKind::Pressure => "hPa",
             SensorKind::Visibility => "m",
             SensorKind::AlertCount => "count",
-            SensorKind::EarthquakeDepth => "km",
-            SensorKind::EarthquakeMagnitude => "magnitude",
-            SensorKind::EarthquakeSignificance => "score",
-            SensorKind::EarthquakeTsunami => "boolean",
         }
     }
 
@@ -214,8 +192,7 @@ mod tests {
         let ids = registry.setup_sensors().await.unwrap();
 
         assert_eq!(ids.get(SensorKind::Temperature), SensorId(100));
-        assert_eq!(ids.get(SensorKind::Lat), SensorId(112));
-        assert_eq!(ids.get(SensorKind::EarthquakeTsunami), SensorId(117));
+        assert_eq!(ids.get(SensorKind::AlertCount), SensorId(111));
         mock.assert_async().await;
     }
 }

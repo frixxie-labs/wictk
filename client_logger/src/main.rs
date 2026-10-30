@@ -4,6 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use clap::Parser;
 use device::{DeviceId, DeviceRegistry, NewDevice};
+use geo_event::GeoEventClient;
 use registry::Registry;
 use sensor::{SensorIds, SensorRegistry};
 use storage::StorageClient;
@@ -13,6 +14,7 @@ use wictk_core::{Coordinates, Earthquake, Lightning, Nowcast};
 mod api;
 mod cli;
 mod device;
+mod geo_event;
 mod measurement;
 mod registry;
 mod sensor;
@@ -87,6 +89,7 @@ fn nowcast_measurements(
 struct Logger {
     weather: WeatherClient,
     storage: StorageClient,
+    geo_events: GeoEventClient,
     devices: DeviceRegistry,
     sensors: SensorIds,
 }
@@ -121,13 +124,16 @@ impl Logger {
             earthquakes = ?earthquakes,
             "Earthquakes found near {EARTHQUAKE_REGION} in the last 10 minutes"
         );
-        self.storage
-            .store(&measurement::earthquakes(
-                &earthquakes,
-                device,
-                &self.sensors,
-            ))
-            .await
+        for earthquake in &earthquakes {
+            match geo_event::earthquake(earthquake, device) {
+                Some(new) => self.geo_events.store_earthquake(&new).await?,
+                None => tracing::warn!(
+                    id = earthquake.id,
+                    "Skipping earthquake without magnitude or significance"
+                ),
+            }
+        }
+        Ok(())
     }
 
     async fn log_location(&mut self, location: &str) -> Result<()> {
@@ -176,9 +182,11 @@ impl Logger {
             recent.len(),
             total
         );
-        self.storage
-            .store(&measurement::lightnings(&recent, device, &self.sensors))
-            .await?;
+        let strikes: Vec<_> = recent
+            .iter()
+            .map(|lightning| geo_event::lightning_strike(lightning, device))
+            .collect();
+        self.geo_events.store_lightning(&strikes).await?;
         tracing::info!("Stored {} lightning records", recent.len());
         Ok(())
     }
@@ -218,7 +226,15 @@ async fn main() -> Result<()> {
 
     let mut logger = Logger {
         weather: WeatherClient::new(client.clone(), opts.service_url.clone()),
-        storage: StorageClient::new(client, api::endpoint(&opts.hemrs_url, "api/measurements")?),
+        storage: StorageClient::new(
+            client.clone(),
+            api::endpoint(&opts.hemrs_url, "api/measurements")?,
+        ),
+        geo_events: GeoEventClient::new(
+            client,
+            api::endpoint(&opts.hemrs_url, "api/lightning")?,
+            api::endpoint(&opts.hemrs_url, "api/earthquakes")?,
+        ),
         devices,
         sensors,
     };
